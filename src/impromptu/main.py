@@ -1,7 +1,10 @@
 """Impromptu: Multi-agent TUI with tmux orchestration."""
 
+import os
 import sys
 import subprocess
+from pathlib import Path
+from typing import Optional
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Static, ListView, ListItem, Label, Button
 from textual.containers import Vertical, Center
@@ -10,6 +13,9 @@ from textual.screen import ModalScreen
 
 from .config import load_config, Config
 from . import tmux
+from .agents import SessionWatcher
+from .models import AgentType, GeminiAgent
+from .state import StateStore, UIState
 from .theme import get_colors, DEFAULT_THEME
 
 
@@ -328,28 +334,37 @@ class NotificationArea(Static):
 
 
 class AgentItem(ListItem):
-    """A list item representing an agent."""
+    """A list item representing an agent with message preview."""
 
     # Status icons: green=active, yellow=busy, white=idle
     STATUS_ICONS = {
         "active": "🟢",  # Green - visible and ready
         "busy": "🟡",    # Yellow - processing/outputting
         "idle": "⚪",    # White - background, waiting
+        "ready": "🟢",   # Green - response ready
+        "thinking": "🟡",  # Yellow - thinking
     }
 
-    def __init__(self, name: str, index: int, status: str = "idle", active: bool = False) -> None:
+    def __init__(self, name: str, index: int, status: str = "idle", 
+                 active: bool = False, messages: list[str] | None = None) -> None:
         super().__init__()
         self.agent_name = name
         self.agent_index = index
         self.status = status
         self.is_active = active
+        self.messages = messages or []
         # Add class for styling
         if active:
             self.add_class("active-agent")
 
     def compose(self) -> ComposeResult:
         icon = self.STATUS_ICONS.get(self.status, "⚪")
-        yield Label(f"{icon} [{self.agent_index + 1}] {self.agent_name}")
+        # Header line: [number] icon name
+        yield Label(f"[{self.agent_index + 1}] {icon} {self.agent_name}", classes="agent-header")
+        # Always create 2 message label slots (even if empty) so they can be updated later
+        for i in range(2):
+            msg = self.messages[i] if i < len(self.messages) else ""
+            yield Label(msg, classes="agent-message")
 
 
 class Sidebar(App):
@@ -407,6 +422,21 @@ class Sidebar(App):
     /* When both highlighted and active, show brighter selection */
     ListItem.active-agent.--highlight {{
         background: {c.primary_dim};
+    }}
+    
+    /* Agent item expanded layout */
+    .agent-header {{
+        color: {c.text};
+    }}
+    
+    .agent-message {{
+        color: {c.text_muted};
+        padding-left: 3;
+        text-style: italic;
+    }}
+    
+    ListItem.active-agent .agent-header {{
+        color: {c.primary};
     }}
 
     #current-agent {{
@@ -468,10 +498,13 @@ class Sidebar(App):
         self._agents: list[tuple[str, str]] = []  # (name, command) pairs from config
         self._tracked_panes: list[tmux.TrackedPane] = []  # Tracked agent panes
         self._sidebar_pane: tmux.TrackedPane | None = None  # Sidebar pane (always visible)
-        self._active_pane_index: int = 0  # Index of currently visible pane (explicit tracking)
         self._poll_timer: Timer | None = None
-        self._pane_statuses: dict[str, str] = {}  # Cache of pane_id -> status
+        self._agents_by_pane: dict[str, BaseAgent] = {}  # pane_id -> agent instance
         self._polling_paused: bool = False  # Temporarily pause polling during operations
+        
+        # Centralized state store
+        self._store = StateStore()
+        self._store.subscribe(self._on_state_change)
     
     def _pause_polling(self, duration: float = 3.0) -> None:
         """Pause status polling for a duration after pane operations."""
@@ -483,12 +516,29 @@ class Sidebar(App):
         self._polling_paused = False
     
     def _show_notification(self, message: str, duration: float = 5.0) -> None:
-        """Show a notification in the custom notification area."""
-        try:
-            notification = self.query_one(NotificationArea)
-            notification.show_message(message, duration)
-        except Exception:
-            pass  # Notification area not available
+        """Show a notification via the state store."""
+        self._store.add_notification(message, duration)
+    
+    def _on_state_change(self, old_state: UIState, new_state: UIState) -> None:
+        """React to state changes by updating UI.
+        
+        This is called whenever any part of the state changes.
+        """
+        # Update agent list if agents changed
+        if old_state.agents != new_state.agents or old_state.active_index != new_state.active_index:
+            self._render_agent_list()
+        
+        # Update current agent label if changed
+        if old_state.current_agent_name != new_state.current_agent_name:
+            try:
+                current_label = self.query_one("#current-agent", Static)
+                current_label.update(f"▶ {new_state.current_agent_name}")
+            except Exception:
+                pass
+        
+        # Update notifications if changed
+        if old_state.notifications != new_state.notifications:
+            self._render_notifications()
 
     def compose(self) -> ComposeResult:
         yield Static("IMPROMPTU", id="title")
@@ -508,39 +558,130 @@ class Sidebar(App):
         agents = self.config.agents.agents
         self._agents = list(agents.items())
         
-        # Get pane IDs - sidebar is pane 0, first agent is pane 1
+        # Get sidebar pane ID
         sidebar_id = tmux.get_pane_id("0")
         if sidebar_id:
             self._sidebar_pane = tmux.TrackedPane(pane_id=sidebar_id, name="sidebar")
         
-        initial_pane_id = tmux.get_pane_id("1")
-        if initial_pane_id:
-            first_name = self._agents[0][0] if self._agents else "agent-1"
-            self._tracked_panes = [tmux.TrackedPane(pane_id=initial_pane_id, name=first_name)]
-
-        self._refresh_list()
+        # Kill any existing pane 1 (from startup script) - we'll create our own
+        existing_pane = tmux.get_pane_id("1")
+        if existing_pane:
+            tmux.run_command(f'kill-pane -t {existing_pane}')
         
-        # Start polling for status updates every 2 seconds
+        # Create initial agent
+        first_name = self._agents[0][0] if self._agents else "gemini"
+        self._create_agent(first_name, is_first=True)
+        
+        # Start polling for status and notification expiration
         self._poll_timer = self.set_interval(2.0, self._poll_status)
+        self.set_interval(0.5, self._expire_notifications)
+    
+    def _create_agent(self, name: str, is_first: bool = False) -> Optional[GeminiAgent]:
+        """Create a new agent with proper session tracking.
+        
+        Args:
+            name: Display name for the agent
+            is_first: If True, this is the first agent (uses split-window -h)
+        
+        Returns:
+            The created GeminiAgent, or None if creation failed
+        """
+        import time
+        import uuid as uuid_module
+        
+        # Create agent
+        agent_uuid = str(uuid_module.uuid4())
+        project_dir = os.getcwd()
+        agent = GeminiAgent(id=agent_uuid, name=name, pane_id=None)
+        agent.init(project_dir)
+        # Note: agent.created_at is set automatically for session matching
+        
+        # Create the pane with gemini
+        if is_first:
+            tmux.run_command(
+                f'split-window -h -t 0 "gemini" \\; '
+                f'resize-pane -t 0 -x 20%'
+            )
+        else:
+            visible_pane = self._get_visible_pane()
+            if not visible_pane:
+                return None
+            tmux.run_command(
+                f'split-window -v -t {visible_pane.pane_id} "gemini" \\; '
+                f'break-pane -d -s {visible_pane.pane_id} \\; '
+                f'resize-pane -t 0 -x 20% \\; '
+                f'select-pane -t 1'
+            )
+        
+        # Get the new pane's ID
+        new_pane_id = tmux.get_pane_id("1")
+        
+        if new_pane_id:
+            agent.pane_id = new_pane_id
+            
+            new_pane = tmux.TrackedPane(pane_id=new_pane_id, name=name)
+            if is_first:
+                self._tracked_panes = [new_pane]
+            else:
+                self._tracked_panes.append(new_pane)
+            
+            # Session will be found and claimed during regular polling
+            # (no waiting here for faster startup)
+            
+            self._agents_by_pane[new_pane_id] = agent
+            
+            # Add to state store
+            status = agent._watcher.status if hasattr(agent, '_watcher') and agent._watcher else "idle"
+            messages = agent._watcher.last_messages if hasattr(agent, '_watcher') and agent._watcher else []
+            self._store.add_agent(new_pane_id, name, status=status, messages=messages)
+            
+            if is_first:
+                self._store.set_active_agent(0)
+            else:
+                new_index = len(self._store.state.agents) - 1
+                self._store.set_active_agent(new_index)
+                new_pane.select()
+            
+            return agent
+        
+        return None
     
     def _poll_status(self) -> None:
-        """Poll pane status and update display only if changed."""
+        """Poll pane status and update state store."""
         # Skip polling if paused (during pane operations)
         if self._polling_paused:
             return
         
-        # Check if any status changed
-        status_changed = False
+        # Check each agent's watcher for changes
         for pane in self._tracked_panes:
-            new_status = pane.get_status()
-            old_status = self._pane_statuses.get(pane.pane_id)
-            if new_status != old_status:
-                status_changed = True
-                self._pane_statuses[pane.pane_id] = new_status
-        
-        # Only update icons if something changed
-        if status_changed:
-            self._update_status_icons()
+            agent = self._agents_by_pane.get(pane.pane_id)
+            if agent:
+                # If agent has no watcher yet, try to find its NEW unclaimed session
+                if not hasattr(agent, '_watcher') or not agent._watcher:
+                    session_path = agent.find_new_session()
+                    if session_path:
+                        agent.claim_session(session_path)
+                        agent._watcher = SessionWatcher(session_path)
+                        agent._watcher.check_and_update()
+                
+                # Check if file changed - updates cached data if so
+                if hasattr(agent, '_watcher') and agent._watcher:
+                    agent._watcher.check_and_update()
+                    
+                    # Get cached status and messages (no file I/O)
+                    status = agent._watcher.status
+                    messages = agent._watcher.last_messages
+                    
+                    # Update via store (triggers UI update if changed)
+                    self._store.update_agent(
+                        pane.pane_id,
+                        status=status,
+                        messages=messages
+                    )
+    
+    def _expire_notifications(self) -> None:
+        """Check and expire old notifications."""
+        self._store.expire_notifications()
 
     def _get_visible_pane(self) -> tmux.TrackedPane | None:
         """Get the agent pane that's currently in the main window (visible).
@@ -564,33 +705,37 @@ class Sidebar(App):
         return "\n".join(lines)
 
     def _refresh_list(self) -> None:
-        """Refresh the agent list display - text and highlighting only.
-        
-        Does NOT update status icons (those are handled by polling).
-        """
+        """DEPRECATED: Use _render_agent_list instead. Kept for compatibility."""
+        self._render_agent_list()
+    
+    def _render_agent_list(self) -> None:
+        """Render agent list from state store."""
         list_view = self.query_one("#agent-list", ListView)
+        state = self._store.state
         
-        # Use explicit active index (not tmux query which can be stale)
-        active_index = self._active_pane_index
-
         # Get current items count
         current_count = len(list_view)
-        target_count = len(self._tracked_panes)
+        target_count = len(state.agents)
         
         # Update existing items in place, add new ones, or remove extras
-        for i, pane in enumerate(self._tracked_panes):
-            is_active = (i == active_index)
-            # Use cached status, or default to 'idle'
-            status = self._pane_statuses.get(pane.pane_id, "idle")
+        for i, agent_state in enumerate(state.agents):
+            is_active = (i == state.active_index)
             
             if i < current_count:
-                # Update existing item's label
+                # Update existing item's labels
                 existing_item = list(list_view.children)[i]
                 if existing_item:
                     try:
-                        label = existing_item.query_one(Label)
-                        icon = AgentItem.STATUS_ICONS.get(status, "⚪")
-                        label.update(f"{icon} [{i + 1}] {pane.name}")
+                        # Update header label
+                        labels = list(existing_item.query(Label))
+                        if labels:
+                            icon = AgentItem.STATUS_ICONS.get(agent_state.status, "⚪")
+                            labels[0].update(f"[{i + 1}] {icon} {agent_state.name}")
+                        
+                        # Update message labels
+                        for j, msg in enumerate(agent_state.messages[:2]):
+                            if j + 1 < len(labels):
+                                labels[j + 1].update(msg)
                     except Exception:
                         pass
                     # Update active class
@@ -599,41 +744,36 @@ class Sidebar(App):
                     else:
                         existing_item.remove_class("active-agent")
             else:
-                # Add new item
-                item = AgentItem(pane.name, i, status=status, active=is_active)
+                # Add new item with messages
+                item = AgentItem(agent_state.name, i, status=agent_state.status, 
+                                active=is_active, messages=agent_state.messages)
                 list_view.append(item)
         
-        # Remove extra items if we have fewer panes now
+        # Remove extra items if we have fewer agents now
         while len(list_view) > target_count:
             list_view.pop()
-
-        # Update current agent label
-        if 0 <= active_index < len(self._tracked_panes):
-            active_pane = self._tracked_panes[active_index]
-            current_label = self.query_one("#current-agent", Static)
-            current_label.update(f"▶ {active_pane.name}")
         
-        # Set cursor position directly
-        if 0 <= active_index < len(list_view):
-            list_view.index = active_index
+        # Set cursor position
+        if 0 <= state.active_index < len(list_view):
+            list_view.index = state.active_index
     
-    def _update_status_icons(self) -> None:
-        """Update only the status icons in the list (called by polling)."""
-        list_view = self.query_one("#agent-list", ListView)
-        children = list(list_view.children)
-        
-        for i, pane in enumerate(self._tracked_panes):
-            if i < len(children):
-                existing_item = children[i]
-                status = self._pane_statuses.get(pane.pane_id, "idle")
-                try:
-                    label = existing_item.query_one(Label)
-                    icon = AgentItem.STATUS_ICONS.get(status, "⚪")
-                    # Rebuild the full label text to avoid emoji encoding issues
-                    new_text = f"{icon} [{i + 1}] {pane.name}"
-                    label.update(new_text)
-                except Exception:
-                    pass
+    def _render_notifications(self) -> None:
+        """Render notifications from state store."""
+        try:
+            notification_area = self.query_one(NotificationArea)
+            state = self._store.state
+            
+            if state.notifications:
+                # Show newest at top
+                text = "\n".join(n.message for n in reversed(state.notifications))
+                notification_area.update(text)
+                notification_area.add_class("notification")
+            else:
+                notification_area.update("")
+                notification_area.remove_class("notification")
+            notification_area.refresh()
+        except Exception:
+            pass
     
     def _update_active_highlight(self) -> None:
         """Update only the active-agent class, cursor, and status icons.
@@ -641,42 +781,10 @@ class Sidebar(App):
         Sets active pane to 'active' (green), others to 'idle' immediately.
         CPU-based busy detection is paused during this time.
         """
-        list_view = self.query_one("#agent-list", ListView)
-        children = list(list_view.children)
-        active_index = self._active_pane_index
-        
-        # Update active-agent class and status on all items
-        for i, item in enumerate(children):
-            if i < len(self._tracked_panes):
-                pane = self._tracked_panes[i]
-                
-                # Set status: active pane is green, others are idle
-                if i == active_index:
-                    item.add_class("active-agent")
-                    self._pane_statuses[pane.pane_id] = "active"
-                    status = "active"
-                else:
-                    item.remove_class("active-agent")
-                    self._pane_statuses[pane.pane_id] = "idle"
-                    status = "idle"
-                
-                # Update the label with new status icon
-                try:
-                    label = item.query_one(Label)
-                    icon = AgentItem.STATUS_ICONS.get(status, "⚪")
-                    label.update(f"{icon} [{i + 1}] {pane.name}")
-                except Exception:
-                    pass
-        
-        # Update cursor position
-        if 0 <= active_index < len(list_view):
-            list_view.index = active_index
-        
-        # Update current agent label
-        if 0 <= active_index < len(self._tracked_panes):
-            active_pane = self._tracked_panes[active_index]
-            current_label = self.query_one("#current-agent", Static)
-            current_label.update(f"▶ {active_pane.name}")
+        # Just use the store - it will trigger UI update via _on_state_change
+        state = self._store.state
+        if 0 <= state.active_index < len(state.agents):
+            self._store.set_active_agent(state.active_index)
 
     def action_import_agent(self) -> None:
         """Import an agent from a file or URL (placeholder)."""
@@ -699,56 +807,20 @@ class Sidebar(App):
     def _create_agent_pane(self, agent_name: str, agent_command: str) -> None:
         """Create a new agent pane with the given command."""
         try:
-            # Get the currently visible pane (must not be sidebar)
-            visible_pane = self._get_visible_pane()
-            if not visible_pane:
-                self._show_notification("No visible pane")
-                return
+            # Determine display name for new agent
+            if agent_name == "Empty Shell":
+                display_name = f"shell-{len(self._tracked_panes) + 1}"
+            else:
+                count = sum(1 for p in self._tracked_panes if p.name.startswith(agent_name))
+                display_name = f"{agent_name}-{count + 1}" if count > 0 else agent_name
             
-            # Safety: don't operate on sidebar
-            if self._sidebar_pane and visible_pane.pane_id == self._sidebar_pane.pane_id:
-                self._show_notification("Cannot split sidebar")
-                return
+            agent = self._create_agent(display_name, is_first=False)
             
-            # Build the command - if empty, just create shell
-            cmd_part = f' "{agent_command}"' if agent_command else ''
-            
-            # Batch operations: split with command, then break old pane, then resize
-            tmux.run_command(
-                f'split-window -v -t {visible_pane.pane_id}{cmd_part} \\; '
-                f'break-pane -d -s {visible_pane.pane_id} \\; '
-                f'resize-pane -t 0 -x 20% \\; '
-                f'select-pane -t 1'  # Focus the new agent pane
-            )
-            
-            # Get the new pane's ID (the pane that's now in the agent slot)
-            new_pane_id = tmux.get_pane_id("1")
-            
-            if new_pane_id:
-                # Track the new pane with selected name
-                # Add number suffix if this agent name already exists
-                if agent_name == "Empty Shell":
-                    display_name = f"shell-{len(self._tracked_panes) + 1}"
-                else:
-                    # Count existing panes with same base name
-                    count = sum(1 for p in self._tracked_panes if p.name.startswith(agent_name))
-                    display_name = f"{agent_name}-{count + 1}" if count > 0 else agent_name
-                
-                new_pane = tmux.TrackedPane(pane_id=new_pane_id, name=display_name)
-                self._tracked_panes.append(new_pane)
-                
-                # Set this as the active pane
-                self._active_pane_index = len(self._tracked_panes) - 1
-                
-                # Focus the new agent pane
-                new_pane.select()
-                
-                # Add the new item to the list and update statuses
-                self._refresh_list()
-                self._update_active_highlight()  # Set new pane to green immediately
+            if agent:
                 self._pause_polling(3.0)
-                
                 self._show_notification(f"Started: {display_name}")
+            else:
+                self._show_notification("Failed to create agent")
         except Exception as e:
             self._show_notification(f"Failed: {e}")
 
@@ -757,9 +829,11 @@ class Sidebar(App):
         if index >= len(self._tracked_panes):
             self._show_notification(f"No agent {index + 1}")
             return
+        
+        state = self._store.state
 
         # Already on this agent?
-        if index == self._active_pane_index:
+        if index == state.active_index:
             target_pane = self._tracked_panes[index]
             target_pane.select()
             self._show_notification(f"Already on {target_pane.name}")
@@ -768,8 +842,8 @@ class Sidebar(App):
         target_pane = self._tracked_panes[index]
 
         try:
-            # Get the currently active pane (by our tracked index)
-            current_pane = self._tracked_panes[self._active_pane_index] if 0 <= self._active_pane_index < len(self._tracked_panes) else None
+            # Get the currently active pane (from store)
+            current_pane = self._tracked_panes[state.active_index] if 0 <= state.active_index < len(self._tracked_panes) else None
             
             if current_pane and self._sidebar_pane:
                 # Batch: break current, join target, resize, return to sidebar
@@ -787,11 +861,8 @@ class Sidebar(App):
                     f'select-pane -t 1'  # Focus the agent pane
                 )
             
-            # Update active index
-            self._active_pane_index = index
-            
-            # Update highlight immediately (lightweight), then pause status polling
-            self._update_active_highlight()
+            # Update active via store (triggers UI update)
+            self._store.set_active_agent(index)
             self._pause_polling(3.0)
             self._show_notification(f"Switched to {target_pane.name}")
         except Exception as e:
@@ -800,8 +871,9 @@ class Sidebar(App):
     def action_focus_agent_pane(self) -> None:
         """Switch focus to the visible agent pane."""
         try:
-            if 0 <= self._active_pane_index < len(self._tracked_panes):
-                active_pane = self._tracked_panes[self._active_pane_index]
+            state = self._store.state
+            if 0 <= state.active_index < len(self._tracked_panes):
+                active_pane = self._tracked_panes[state.active_index]
                 active_pane.select()
         except Exception:
             pass
