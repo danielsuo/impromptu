@@ -144,22 +144,30 @@ class GeminiAgent(Agent):
     
     def find_new_session(self) -> Optional[Path]:
         """Find an unclaimed session file created after this agent was created."""
+        import time as time_module
+        
         session_dir = self.get_session_dir()
         if not session_dir or not session_dir.exists():
             return None
         
+        # Grace period: wait 0.5s after agent creation before claiming
+        # This reduces race conditions when multiple agents are created quickly
+        if time_module.time() - self.created_at < 0.5:
+            return None
+        
         # Find unclaimed sessions with mtime >= created_at
-        # (>= handles timing precision; claimed sessions prevents duplicates)
         new_sessions = []
         for f in session_dir.glob("session-*.json"):
-            if f.stat().st_mtime >= self.created_at and str(f) not in _claimed_sessions:
-                new_sessions.append(f)
+            mtime = f.stat().st_mtime
+            if mtime >= self.created_at and str(f) not in _claimed_sessions:
+                new_sessions.append((f, mtime))
         
         if not new_sessions:
             return None
         
-        # Return the first unclaimed one (created earliest)
-        return min(new_sessions, key=lambda p: p.stat().st_mtime)
+        # Return the session closest to this agent's creation time
+        # (the first one created after created_at)
+        return min(new_sessions, key=lambda x: x[1])[0]
     
     def claim_session(self, session_path: Path) -> None:
         """Claim a session file so other agents won't use it."""
