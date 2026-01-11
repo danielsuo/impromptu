@@ -336,13 +336,12 @@ class NotificationArea(Static):
 class AgentItem(ListItem):
     """A list item representing an agent with message preview."""
 
-    # Status icons: green=active, yellow=busy, white=idle
+    # Status icons: green=active, white=idle, yellow=busy, red=requires input
     STATUS_ICONS = {
-        "active": "🟢",  # Green - visible and ready
-        "busy": "🟡",    # Yellow - processing/outputting
-        "idle": "⚪",    # White - background, waiting
-        "ready": "🟢",   # Green - response ready
-        "thinking": "🟡",  # Yellow - thinking
+        "active": "🟢",    # Green - visible and active
+        "idle": "⚪",      # White - waiting, no recent activity
+        "thinking": "🟡",  # Yellow - processing/busy
+        "ready": "🔴",     # Red - requires user input
     }
 
     def __init__(self, name: str, index: int, status: str = "idle", 
