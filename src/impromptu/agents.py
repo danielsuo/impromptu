@@ -90,14 +90,42 @@ class SessionWatcher:
                     prefix = "▸" if msg_type == "user" else "◂"
                     self._cached_last_messages.insert(0, f"{prefix} {content}")
             
-            # Determine status from last message
+            # Determine status from last message and activity
             if messages:
                 last_msg = messages[-1]
                 last_type = last_msg.get("type", "")
                 
-                # Check if recent activity (within 10s)
-                if session_age < 10:
-                    if last_type == "user":
+                # Check for pending tool calls (gemini is executing tools)
+                tool_calls = last_msg.get("toolCalls", [])
+                has_pending_tools = any(
+                    tc.get("status") == "pending" for tc in tool_calls
+                )
+                
+                # Check for recent thoughts (within 30s = actively thinking)
+                thoughts = last_msg.get("thoughts", [])
+                has_recent_thoughts = False
+                if thoughts:
+                    try:
+                        from datetime import datetime
+                        for thought in thoughts:
+                            ts = thought.get("timestamp", "")
+                            if ts:
+                                if ts.endswith('Z'):
+                                    ts = ts[:-1] + '+00:00'
+                                thought_time = datetime.fromisoformat(ts)
+                                thought_age = time.time() - thought_time.timestamp()
+                                if thought_age < 30:
+                                    has_recent_thoughts = True
+                                    break
+                    except Exception:
+                        pass
+                
+                # Status logic:
+                # - "thinking": user sent message OR pending tools OR recent thoughts
+                # - "ready": gemini responded and waiting for user (within 30s)
+                # - "idle": no recent activity
+                if session_age < 30:
+                    if last_type == "user" or has_pending_tools or has_recent_thoughts:
                         self._cached_status = "thinking"
                     elif last_type == "gemini":
                         self._cached_status = "ready"
