@@ -60,61 +60,42 @@ class SessionWatcher:
         return True
     
     def _update_from_file(self) -> None:
-        """Parse file and update cached last messages and status."""
+        """Parse file and update cached last messages and status.
+        
+        Uses tail-read optimization: reads only last 4KB to find recent messages.
+        """
         try:
-            with open(self.session_path, 'r') as f:
-                data = json.load(f)
+            # Read only the last 4KB of the file for speed
+            file_size = self.session_path.stat().st_size
+            read_size = min(file_size, 4096)
             
-            messages = data.get("messages", [])
-            last_updated = data.get("lastUpdated", "")
+            with open(self.session_path, 'rb') as f:
+                if file_size > read_size:
+                    f.seek(file_size - read_size)
+                tail_data = f.read().decode('utf-8', errors='ignore')
             
-            # Parse session age for status detection
-            session_age = 9999
-            if last_updated:
-                try:
-                    from datetime import datetime
-                    if last_updated.endswith('Z'):
-                        last_updated_parsed = last_updated[:-1] + '+00:00'
-                    else:
-                        last_updated_parsed = last_updated
-                    dt = datetime.fromisoformat(last_updated_parsed)
-                    session_age = time.time() - dt.timestamp()
-                except Exception:
-                    pass
+            # Find message patterns in tail - look for "content" and "type" fields
+            import re
             
-            # Get last 2 messages with content (for UI preview, newest first)
+            # Pattern to find message blocks with content and type
+            # Messages have format: {"type": "user|gemini", "content": "..."}
+            pattern = r'"type"\s*:\s*"(user|gemini)"[^}]*?"content"\s*:\s*"([^"]*)"'
+            matches = re.findall(pattern, tail_data, re.DOTALL)
+            
+            # Get last 2 messages (matches are in order found in tail)
             self._cached_last_messages = []
-            for msg in reversed(messages):
+            for msg_type, content in reversed(matches[-4:]):  # Get last 4, reverse
                 if len(self._cached_last_messages) >= 2:
                     break
-                content = msg.get("content", "")
                 if content and content.strip():
-                    msg_type = msg.get("type", "unknown")
-                    # Truncate
+                    # Unescape JSON strings
+                    content = content.replace('\\n', ' ').replace('\\t', ' ')
                     if len(content) > 40:
                         content = content[:37] + "..."
-                    content = content.replace("\n", " ").strip()
+                    content = content.strip()
                     prefix = "▸" if msg_type == "user" else "◂"
                     self._cached_last_messages.append(f"{prefix} {content}")
-            
-            # Determine status from last message type
-            # Simple logic: if last message is from user, we're busy/thinking
-            #               if last message is from gemini, we're idle (ready for input)
-            if messages:
-                last_msg = messages[-1]
-                last_type = last_msg.get("type", "")
-                
-                if last_type == "user":
-                    # User sent message, agent should be processing
-                    self._cached_status = "thinking"
-                elif last_type == "gemini":
-                    # Agent responded, waiting for user
-                    self._cached_status = "ready"
-                else:
-                    self._cached_status = "idle"
-            else:
-                self._cached_status = "idle"
-                
+                    
         except Exception:
             pass
     

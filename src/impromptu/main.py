@@ -148,12 +148,12 @@ class ShortcutsModal(ModalScreen[None]):
     }}
     
     #shortcuts-container {{
-        width: 50;
+        width: 40;
         height: auto;
-        max-height: 24;
+        max-height: 28;
         background: {c.surface};
         border: thick {c.primary};
-        padding: 1 2;
+        padding: 2 3;
     }}
     
     #shortcuts-title {{
@@ -195,18 +195,20 @@ class ShortcutsModal(ModalScreen[None]):
             yield Static("⌨ Keyboard Shortcuts", id="shortcuts-title")
             
             yield Static("Navigation", classes="shortcut-section")
-            yield Static("j / ↓         Down      Enter   Select", classes="shortcut-row")
-            yield Static("k / ↑         Up        Tab     Focus pane", classes="shortcut-row")
+            yield Static("j / ↓    Move down", classes="shortcut-row")
+            yield Static("k / ↑    Move up", classes="shortcut-row")
+            yield Static("Enter    Select agent", classes="shortcut-row")
+            yield Static("Tab      Focus pane", classes="shortcut-row")
             
             yield Static("Agents", classes="shortcut-section")
-            yield Static("n             New       r       Rename", classes="shortcut-row")
-            yield Static("Alt+i         Impromptu Alt+r   Rename (global)", classes="shortcut-row")
+            yield Static("n        New agent", classes="shortcut-row")
+            yield Static("r        Rename agent", classes="shortcut-row")
+            yield Static("i        Import pane", classes="shortcut-row")
+            yield Static("s        Toggle sort", classes="shortcut-row")
+            yield Static("1-5      Switch to #", classes="shortcut-row")
             
-            yield Static("Other", classes="shortcut-section")
-            yield Static("1-5           Switch    ?       Help", classes="shortcut-row")
-            yield Static("Esc           Close", classes="shortcut-row")
-            
-            yield Static("─────────────────────────────────", id="close-hint")
+            yield Static("", classes="shortcut-section")
+            yield Static("Esc / ?  Close help", classes="shortcut-row")
     
     def action_close(self) -> None:
         """Close the modal."""
@@ -338,12 +340,11 @@ class NotificationArea(Static):
 class AgentItem(ListItem):
     """A list item representing an agent with message preview."""
 
-    # Status icons: green=active, white=idle, yellow=busy, red=blocked
+    # Status icons: green=idle, yellow=busy, red=blocked
     STATUS_ICONS = {
-        "active": "🟢",    # Green - visible and selected
-        "idle": "⚪",      # White - waiting on user input, not blocked
+        "idle": "🟢",      # Green - ready for input
         "busy": "🟡",      # Yellow - agent is processing
-        "blocked": "🔴",   # Red - blocked, needs user input to continue
+        "blocked": "🔴",   # Red - needs user approval to continue
     }
 
     def __init__(self, name: str, index: int, status: str = "idle", 
@@ -477,6 +478,7 @@ class Sidebar(App):
         ("n", "new_agent", "New"),
         ("r", "rename_agent", "Rename"),
         ("i", "import_agent", "Import"),
+        ("s", "toggle_reorder", "Sort"),
         ("question_mark", "show_shortcuts", "Help"),
         ("1", "switch_agent(0)", "1"),
         ("2", "switch_agent(1)", "2"),
@@ -568,6 +570,13 @@ class Sidebar(App):
         if sidebar_id:
             self._sidebar_pane = tmux.TrackedPane(pane_id=sidebar_id, name="sidebar")
         
+        # Clear stale session mappings from previous runs
+        # This prevents off-by-one matching with old agent UUIDs
+        from pathlib import Path
+        for f in [Path("/tmp/impromptu_session_mapping.txt"), Path("/tmp/impromptu_agent_state.txt")]:
+            if f.exists():
+                f.unlink()
+        
         # Kill any existing pane 1 (from startup script) - we'll create our own
         existing_pane = tmux.get_pane_id("1")
         if existing_pane:
@@ -582,11 +591,23 @@ class Sidebar(App):
         self._file_watcher.start()
         
         # Watch for state files in /tmp (already done in watcher init)
-        # Also need to watch session directories - done when agents are created
+        # Also watch session chats directory AND project dir for logs.json
+        import hashlib
+        gemini_tmp = Path.home() / ".gemini" / "tmp"
+        cwd_physical = Path.cwd().resolve()
+        project_hash = hashlib.sha256(str(cwd_physical).encode()).hexdigest()
+        project_dir = gemini_tmp / project_hash
+        session_dir = project_dir / "chats"
+        # Watch project dir for logs.json (instant user message detection)
+        if project_dir.exists():
+            self._file_watcher.watch_session_dir(project_dir)
+        # Watch chats dir for session JSON updates
+        if session_dir.exists():
+            self._file_watcher.watch_session_dir(session_dir)
         
-        # Polling needed for session matching and initial discovery (0.3s)
+        # Fast polling for session matching and message updates (0.1s)
         # File watcher supplements this with instant updates on changes
-        self.set_interval(0.3, self._poll_status)
+        self.set_interval(0.1, self._poll_status)
         self.set_interval(0.5, self._expire_notifications)
     
     def _on_file_change(self, path: Path) -> None:
@@ -681,16 +702,8 @@ class Sidebar(App):
             if agent.session_path:
                 continue
             
-            # Try hook-based matching first (most reliable when hooks are enabled)
+            # Hook-based matching ONLY - fallbacks cause race conditions during rapid creation
             session_file = agent.find_session_by_hook()
-            
-            # Fallback to PID-based matching if hook isn't working
-            if not session_file:
-                session_file = agent.find_session_by_pid()
-            
-            # Final fallback: find newest unclaimed session
-            if not session_file:
-                session_file = agent.find_new_session()
             
             if session_file:
                 agent.claim_session(session_file)
@@ -749,13 +762,17 @@ class Sidebar(App):
         list_view = self.query_one("#agent-list", ListView)
         state = self._store.state
         
+        # Get sorted agents if auto_reorder is enabled
+        sorted_agents, active_pane_id = self._store.get_sorted_agents_with_active()
+        
         # Get current items count
         current_count = len(list_view)
-        target_count = len(state.agents)
+        target_count = len(sorted_agents)
         
         # Update existing items in place, add new ones, or remove extras
-        for i, agent_state in enumerate(state.agents):
-            is_active = (i == state.active_index)
+        for i, agent_state in enumerate(sorted_agents):
+            # Check if this is the active agent by pane_id
+            is_active = (agent_state.pane_id == active_pane_id)
             
             if i < current_count:
                 # Update existing item's labels
@@ -765,13 +782,8 @@ class Sidebar(App):
                         # Update header label
                         labels = list(existing_item.query(Label))
                         if labels:
-                            # Active agent: green if idle, otherwise show busy/blocked
-                            # Non-active: show their real status
-                            if is_active and agent_state.status == "idle":
-                                status = "active"
-                            else:
-                                status = agent_state.status
-                            icon = AgentItem.STATUS_ICONS.get(status, "⚪")
+                            # Use actual status (green=idle, yellow=busy, red=blocked)
+                            icon = AgentItem.STATUS_ICONS.get(agent_state.status, "🟢")
                             labels[0].update(f"[{i + 1}] {icon} {agent_state.name}")
                         
                         # Update message labels
@@ -780,19 +792,14 @@ class Sidebar(App):
                                 labels[j + 1].update(msg)
                     except Exception:
                         pass
-                    # Update active class
+                    # Update active class (for highlighting)
                     if is_active:
                         existing_item.add_class("active-agent")
                     else:
                         existing_item.remove_class("active-agent")
             else:
                 # Add new item with messages
-                # Active agent: green if idle, otherwise show busy/blocked
-                if is_active and agent_state.status == "idle":
-                    status = "active"
-                else:
-                    status = agent_state.status
-                item = AgentItem(agent_state.name, i, status=status, 
+                item = AgentItem(agent_state.name, i, status=agent_state.status, 
                                 active=is_active, messages=agent_state.messages)
                 list_view.append(item)
         
@@ -800,9 +807,12 @@ class Sidebar(App):
         while len(list_view) > target_count:
             list_view.pop()
         
-        # Set cursor position
-        if 0 <= state.active_index < len(list_view):
-            list_view.index = state.active_index
+        # Set cursor position to active agent's current position in sorted list
+        if active_pane_id:
+            for i, agent in enumerate(sorted_agents):
+                if agent.pane_id == active_pane_id:
+                    list_view.index = i
+                    break
     
     def _render_notifications(self) -> None:
         """Render notifications from state store."""
@@ -872,21 +882,39 @@ class Sidebar(App):
             self._show_notification(f"Failed: {e}")
 
     def action_switch_agent(self, index: int) -> None:
-        """Switch to a different agent using break/join-pane."""
-        if index >= len(self._tracked_panes):
+        """Switch to a different agent using break/join-pane.
+        
+        Index corresponds to display order (which may be sorted if auto_reorder is on).
+        """
+        state = self._store.state
+        sorted_agents, active_pane_id = self._store.get_sorted_agents_with_active()
+        
+        if index >= len(sorted_agents):
             self._show_notification(f"No agent {index + 1}")
             return
         
-        state = self._store.state
+        # Get the pane_id of the target agent in display order
+        target_agent_state = sorted_agents[index]
+        target_pane_id = target_agent_state.pane_id
+        
+        # Find the target pane by pane_id
+        target_pane = None
+        target_index = -1
+        for i, pane in enumerate(self._tracked_panes):
+            if pane.pane_id == target_pane_id:
+                target_pane = pane
+                target_index = i
+                break
+        
+        if not target_pane:
+            self._show_notification(f"Agent pane not found")
+            return
 
         # Already on this agent?
-        if index == state.active_index:
-            target_pane = self._tracked_panes[index]
+        if target_pane_id == active_pane_id:
             target_pane.select()
             self._show_notification(f"Already on {target_pane.name}")
             return
-        
-        target_pane = self._tracked_panes[index]
 
         try:
             # Get the currently active pane (from store)
@@ -900,7 +928,7 @@ class Sidebar(App):
             # Check if target is already in main window (nothing to do)
             if target_pane.is_in_main_window():
                 target_pane.select()
-                self._store.set_active_agent(index)
+                self._store.set_active_agent(target_index)
                 self._show_notification(f"Focused {target_pane.name}")
                 return
             
@@ -924,7 +952,7 @@ class Sidebar(App):
                 )
             
             # Update active via store (triggers UI update)
-            self._store.set_active_agent(index)
+            self._store.set_active_agent(target_index)
             self._pause_polling(3.0)
             self._show_notification(f"Switched to {target_pane.name}")
         except Exception as e:
@@ -953,6 +981,13 @@ class Sidebar(App):
     def action_show_shortcuts(self) -> None:
         """Show the keyboard shortcuts modal."""
         self.push_screen(ShortcutsModal())
+    
+    def action_toggle_reorder(self) -> None:
+        """Toggle auto-reorder of agents by status priority."""
+        current = self._store.state.auto_reorder
+        self._store.update(auto_reorder=not current)
+        status = "ON" if not current else "OFF"
+        self._show_notification(f"Auto-reorder: {status}")
     
     def action_rename_agent(self) -> None:
         """Show modal to rename the currently highlighted agent."""

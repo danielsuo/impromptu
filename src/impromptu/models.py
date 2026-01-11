@@ -74,8 +74,9 @@ class Agent:
         return ""
 
 
-# Module-level set of claimed session paths (to prevent duplicates)
-_claimed_sessions: set[str] = set()
+
+# Module-level dict of claimed session paths -> agent UUID (to prevent duplicates)
+_claimed_sessions: dict[str, str] = {}
 
 
 @dataclass
@@ -206,7 +207,10 @@ class GeminiAgent(Agent):
         
         session_prefix = session_id[:8]
         for f in session_dir.glob(f"session-*-{session_prefix}.json"):
-            return f  # Return even if claimed since this is hook-based (most reliable)
+            # Only return if not claimed by a DIFFERENT agent
+            claimed_by = _claimed_sessions.get(str(f))
+            if claimed_by is None or claimed_by == self.uuid:
+                return f
         
         return None
     
@@ -300,7 +304,7 @@ class GeminiAgent(Agent):
     
     def claim_session(self, session_path: Path) -> None:
         """Claim a session file so other agents won't use it."""
-        _claimed_sessions.add(str(session_path))
+        _claimed_sessions[str(session_path)] = self.uuid
         self.session_path = session_path
     
     def cleanup(self) -> None:
