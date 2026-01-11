@@ -751,7 +751,9 @@ class Sidebar(App):
                         # Update header label
                         labels = list(existing_item.query(Label))
                         if labels:
-                            icon = AgentItem.STATUS_ICONS.get(agent_state.status, "⚪")
+                            # Active agent shows green, others show their real status
+                            status = "active" if is_active else agent_state.status
+                            icon = AgentItem.STATUS_ICONS.get(status, "⚪")
                             labels[0].update(f"[{i + 1}] {icon} {agent_state.name}")
                         
                         # Update message labels
@@ -767,7 +769,9 @@ class Sidebar(App):
                         existing_item.remove_class("active-agent")
             else:
                 # Add new item with messages
-                item = AgentItem(agent_state.name, i, status=agent_state.status, 
+                # Active agent shows green, others show their real status
+                status = "active" if is_active else agent_state.status
+                item = AgentItem(agent_state.name, i, status=status, 
                                 active=is_active, messages=agent_state.messages)
                 list_view.append(item)
         
