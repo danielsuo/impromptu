@@ -120,17 +120,13 @@ class SessionWatcher:
                     except Exception:
                         pass
                 
-                # Status logic:
+                # Status logic (no time threshold, based on last message):
                 # - "thinking": user sent message OR pending tools OR recent thoughts
-                # - "ready": gemini responded and waiting for user (within 30s)
-                # - "idle": no recent activity
-                if session_age < 30:
-                    if last_type == "user" or has_pending_tools or has_recent_thoughts:
-                        self._cached_status = "thinking"
-                    elif last_type == "gemini":
-                        self._cached_status = "ready"
-                    else:
-                        self._cached_status = "idle"
+                # - "ready": gemini responded, waiting for user input
+                if last_type == "user" or has_pending_tools or has_recent_thoughts:
+                    self._cached_status = "thinking"
+                elif last_type == "gemini":
+                    self._cached_status = "ready"
                 else:
                     self._cached_status = "idle"
             else:
@@ -246,3 +242,38 @@ class LogWatcher:
             return dt.timestamp()
         except Exception:
             return 0.0
+    
+    def find_session_by_probe(self, probe_id: str) -> tuple[Optional[str], Optional[str]]:
+        """Search logs.json for a probe message and return (sessionId, project_hash).
+        
+        Args:
+            probe_id: The unique probe string to search for
+            
+        Returns:
+            (sessionId, project_hash) if found, (None, None) otherwise
+        """
+        if not self.GEMINI_TMP_DIR.exists():
+            return None, None
+        
+        for project_dir in self.GEMINI_TMP_DIR.iterdir():
+            if not project_dir.is_dir():
+                continue
+            
+            project_hash = project_dir.name
+            log_file = project_dir / "logs.json"
+            
+            if not log_file.exists():
+                continue
+            
+            try:
+                with open(log_file, 'r') as f:
+                    logs = json.load(f)
+                
+                for entry in logs:
+                    message = entry.get("message", "")
+                    if probe_id in message:
+                        return entry.get("sessionId"), project_hash
+            except Exception:
+                pass
+        
+        return None, None

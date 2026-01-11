@@ -569,7 +569,7 @@ class Sidebar(App):
             tmux.run_command(f'kill-pane -t {existing_pane}')
         
         # Create initial agent
-        first_name = self._agents[0][0] if self._agents else "gemini"
+        first_name = self._agents[0][0] if self._agents else "IMPROMPTU_AGENT_ID={agent.uuid} gemini"
         self._create_agent(first_name, is_first=True)
         
         # Start polling for status and notification expiration
@@ -599,7 +599,7 @@ class Sidebar(App):
         # Create the pane with gemini
         if is_first:
             tmux.run_command(
-                f'split-window -h -t 0 "gemini" \\; '
+                f'split-window -h -t 0 "IMPROMPTU_AGENT_ID={agent.uuid} gemini" \\; '
                 f'resize-pane -t 0 -x 20%'
             )
         else:
@@ -607,7 +607,7 @@ class Sidebar(App):
             if not visible_pane:
                 return None
             tmux.run_command(
-                f'split-window -v -t {visible_pane.pane_id} "gemini" \\; '
+                f'split-window -v -t {visible_pane.pane_id} "IMPROMPTU_AGENT_ID={agent.uuid} gemini" \\; '
                 f'break-pane -d -s {visible_pane.pane_id} \\; '
                 f'resize-pane -t 0 -x 20% \\; '
                 f'select-pane -t 1'
@@ -620,13 +620,14 @@ class Sidebar(App):
             agent.pane_id = new_pane_id
             
             new_pane = tmux.TrackedPane(pane_id=new_pane_id, name=name)
+            
+            # Capture pane PID for session matching
+            agent.pane_pid = new_pane.get_pane_pid()
+            
             if is_first:
                 self._tracked_panes = [new_pane]
             else:
                 self._tracked_panes.append(new_pane)
-            
-            # Session will be found and claimed during regular polling
-            # (no waiting here for faster startup)
             
             self._agents_by_pane[new_pane_id] = agent
             
@@ -652,39 +653,22 @@ class Sidebar(App):
         if self._polling_paused:
             return
         
-        # Check logs.json for new entries to match agents to sessions
-        new_entries = self._log_watcher.get_new_log_entries()
-        for entry in new_entries:
-            session_id = entry["sessionId"]
-            timestamp = self._log_watcher.parse_timestamp(entry["timestamp"])
-            project_hash = entry["project_hash"]
+        # Match agents to sessions using gemini-cli hooks (most reliable)
+        for pane in self._tracked_panes:
+            agent = self._agents_by_pane.get(pane.pane_id)
+            if not agent or not isinstance(agent, GeminiAgent):
+                continue
             
-            # Find the agent that matches this entry:
-            # - Same project_hash
-            # - No session yet
-            # - created_at < timestamp (agent existed when message was sent)
-            for pane in self._tracked_panes:
-                agent = self._agents_by_pane.get(pane.pane_id)
-                if not agent or not isinstance(agent, GeminiAgent):
-                    continue
-                
-                # Skip if agent already has a session
-                if agent.session_path:
-                    continue
-                
-                # Check project hash matches
-                if agent.project_hash != project_hash:
-                    continue
-                
-                # Check timing: agent must have been created before the log entry
-                if agent.created_at <= timestamp:
-                    # This is our match! Find and claim the session file
-                    session_file = self._log_watcher.find_session_file(session_id, project_hash)
-                    if session_file:
-                        agent.claim_session(session_file)
-                        agent._watcher = SessionWatcher(session_file)
-                        agent._watcher.check_and_update()
-                    break  # Move to next log entry
+            # Skip if agent already has a session
+            if agent.session_path:
+                continue
+            
+            # Find session via hook-generated mapping file
+            session_file = agent.find_session_by_hook()
+            if session_file:
+                agent.claim_session(session_file)
+                agent._watcher = SessionWatcher(session_file)
+                agent._watcher.check_and_update()
         
         # Update status/messages for agents that have watchers
         for pane in self._tracked_panes:

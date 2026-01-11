@@ -92,6 +92,9 @@ class GeminiAgent(Agent):
     project_hash: Optional[str] = None
     symlink_path: Optional[Path] = None
     
+    # Process tracking - pane PID for session correlation
+    pane_pid: Optional[int] = None
+    
     # Timestamp when agent was created (for session matching)
     created_at: float = field(default_factory=time.time)
     
@@ -168,6 +171,133 @@ class GeminiAgent(Agent):
         # Return the session closest to this agent's creation time
         # (the first one created after created_at)
         return min(new_sessions, key=lambda x: x[1])[0]
+    
+    def find_session_by_hook(self) -> Optional[Path]:
+        """Find session by reading mapping from gemini-cli hook.
+        
+        The SessionStart hook writes {agent_uuid}={session_id} to a mapping file.
+        We read this mapping to find the session ID for this agent.
+        
+        This is the most reliable approach as it uses gemini-cli's hook system.
+        """
+        mapping_file = Path("/tmp/impromptu_session_mapping.txt")
+        
+        if not mapping_file.exists():
+            return None
+        
+        session_id = None
+        try:
+            with open(mapping_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(f"{self.uuid}="):
+                        session_id = line.split("=", 1)[1]
+                        break
+        except Exception:
+            return None
+        
+        if not session_id:
+            return None
+        
+        # Find session file by session ID prefix
+        session_dir = self.get_session_dir()
+        if not session_dir or not session_dir.exists():
+            return None
+        
+        session_prefix = session_id[:8]
+        for f in session_dir.glob(f"session-*-{session_prefix}.json"):
+            if str(f) not in _claimed_sessions:
+                return f
+        
+        return None
+    
+    def find_session_by_custom_id(self) -> Optional[Path]:
+        """Find session file by matching agent UUID prefix in filename.
+        
+        When gemini is launched with GEMINI_SESSION_ID={uuid}, it creates
+        session files named session-{timestamp}-{session_id[:8]}.json.
+        This method finds the session file matching our agent's UUID.
+        
+        This is cross-platform and doesn't require reading process env vars.
+        """
+        session_dir = self.get_session_dir()
+        if not session_dir or not session_dir.exists():
+            return None
+        
+        # Session files are named: session-{date}-{session_id[:8]}.json
+        session_prefix = self.uuid[:8]
+        
+        for f in session_dir.glob(f"session-*-{session_prefix}.json"):
+            if str(f) not in _claimed_sessions:
+                return f
+        
+        return None
+    
+    def find_session_by_pid(self) -> Optional[Path]:
+        """Find session by correlating process start time with session startTime.
+        
+        This is more reliable than timestamp-based matching because it uses
+        the actual process start time to find which session belongs to this agent.
+        """
+        import subprocess
+        import json
+        from datetime import datetime
+        
+        if not self.pane_pid:
+            return None
+        
+        session_dir = self.get_session_dir()
+        if not session_dir or not session_dir.exists():
+            return None
+        
+        # Get process start time via ps
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(self.pane_pid), "-o", "lstart="],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return None
+            
+            # Parse process start time (e.g., "Sat Jan 10 20:34:00 2026")
+            proc_start_str = result.stdout.strip()
+            proc_start = datetime.strptime(proc_start_str, "%a %b %d %H:%M:%S %Y")
+            proc_start_ts = proc_start.timestamp()
+        except Exception:
+            return None
+        
+        # Find session whose startTime is closest to (but after) process start
+        best_session = None
+        best_delta = float('inf')
+        
+        for f in session_dir.glob("session-*.json"):
+            if str(f) in _claimed_sessions:
+                continue
+            
+            try:
+                with open(f, 'r') as fp:
+                    data = json.load(fp)
+                
+                start_time_str = data.get("startTime", "")
+                if not start_time_str:
+                    continue
+                
+                # Parse ISO timestamp (e.g., "2026-01-11T01:34:11.756Z")
+                if start_time_str.endswith('Z'):
+                    start_time_str = start_time_str[:-1] + '+00:00'
+                session_start = datetime.fromisoformat(start_time_str)
+                session_start_ts = session_start.timestamp()
+                
+                # Session must start after process (with some tolerance)
+                delta = session_start_ts - proc_start_ts
+                if 0 <= delta < best_delta:
+                    best_session = f
+                    best_delta = delta
+            except Exception:
+                continue
+        
+        return best_session
     
     def claim_session(self, session_path: Path) -> None:
         """Claim a session file so other agents won't use it."""
