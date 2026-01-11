@@ -17,6 +17,8 @@ from .agents import SessionWatcher, LogWatcher
 from .models import AgentType, GeminiAgent
 from .state import StateStore, UIState
 from .theme import get_colors, DEFAULT_THEME
+from .hooks import install_hooks
+from .file_watcher import get_session_watcher, SessionDirectoryWatcher
 
 
 class AgentSelectItem(ListItem):
@@ -336,12 +338,12 @@ class NotificationArea(Static):
 class AgentItem(ListItem):
     """A list item representing an agent with message preview."""
 
-    # Status icons: green=active, white=idle, yellow=busy, red=requires input
+    # Status icons: green=active, white=idle, yellow=busy, red=blocked
     STATUS_ICONS = {
-        "active": "🟢",    # Green - visible and active
-        "idle": "⚪",      # White - waiting, no recent activity
-        "thinking": "🟡",  # Yellow - processing/busy
-        "ready": "🔴",     # Red - requires user input
+        "active": "🟢",    # Green - visible and selected
+        "idle": "⚪",      # White - waiting on user input, not blocked
+        "busy": "🟡",      # Yellow - agent is processing
+        "blocked": "🔴",   # Red - blocked, needs user input to continue
     }
 
     def __init__(self, name: str, index: int, status: str = "idle", 
@@ -552,6 +554,9 @@ class Sidebar(App):
 
     def on_mount(self) -> None:
         """Initialize agent list and start polling."""
+        # Install Gemini hooks globally if ~/.gemini exists
+        install_hooks()
+        
         self.dark = self.config.appearance.dark_mode
 
         # Build agent list from config
@@ -572,9 +577,22 @@ class Sidebar(App):
         first_name = self._agents[0][0] if self._agents else "IMPROMPTU_AGENT_ID={agent.uuid} gemini"
         self._create_agent(first_name, is_first=True)
         
-        # Start polling for status and notification expiration
-        self._poll_timer = self.set_interval(2.0, self._poll_status)
+        # Start file watcher for instant updates on file changes
+        self._file_watcher = get_session_watcher(self._on_file_change)
+        self._file_watcher.start()
+        
+        # Watch for state files in /tmp (already done in watcher init)
+        # Also need to watch session directories - done when agents are created
+        
+        # Polling needed for session matching and initial discovery (0.3s)
+        # File watcher supplements this with instant updates on changes
+        self.set_interval(0.3, self._poll_status)
         self.set_interval(0.5, self._expire_notifications)
+    
+    def _on_file_change(self, path: Path) -> None:
+        """Called when a session or state file changes - triggers immediate update."""
+        # Use call_from_thread to safely update UI from watchdog thread
+        self.call_from_thread(self._poll_status)
     
     def _create_agent(self, name: str, is_first: bool = False) -> Optional[GeminiAgent]:
         """Create a new agent with proper session tracking.
@@ -653,7 +671,7 @@ class Sidebar(App):
         if self._polling_paused:
             return
         
-        # Match agents to sessions using gemini-cli hooks (most reliable)
+        # Match agents to sessions (try hook-based, fallback to PID-based)
         for pane in self._tracked_panes:
             agent = self._agents_by_pane.get(pane.pane_id)
             if not agent or not isinstance(agent, GeminiAgent):
@@ -663,12 +681,24 @@ class Sidebar(App):
             if agent.session_path:
                 continue
             
-            # Find session via hook-generated mapping file
+            # Try hook-based matching first (most reliable when hooks are enabled)
             session_file = agent.find_session_by_hook()
+            
+            # Fallback to PID-based matching if hook isn't working
+            if not session_file:
+                session_file = agent.find_session_by_pid()
+            
+            # Final fallback: find newest unclaimed session
+            if not session_file:
+                session_file = agent.find_new_session()
+            
             if session_file:
                 agent.claim_session(session_file)
-                agent._watcher = SessionWatcher(session_file)
+                agent._watcher = SessionWatcher(session_file, agent_id=agent.uuid)
                 agent._watcher.check_and_update()
+                # Watch the session directory for instant updates
+                if hasattr(self, '_file_watcher') and session_file.parent:
+                    self._file_watcher.watch_session_dir(session_file.parent)
         
         # Update status/messages for agents that have watchers
         for pane in self._tracked_panes:
@@ -735,8 +765,12 @@ class Sidebar(App):
                         # Update header label
                         labels = list(existing_item.query(Label))
                         if labels:
-                            # Active agent shows green, others show their real status
-                            status = "active" if is_active else agent_state.status
+                            # Active agent: green if idle, otherwise show busy/blocked
+                            # Non-active: show their real status
+                            if is_active and agent_state.status == "idle":
+                                status = "active"
+                            else:
+                                status = agent_state.status
                             icon = AgentItem.STATUS_ICONS.get(status, "⚪")
                             labels[0].update(f"[{i + 1}] {icon} {agent_state.name}")
                         
@@ -753,8 +787,11 @@ class Sidebar(App):
                         existing_item.remove_class("active-agent")
             else:
                 # Add new item with messages
-                # Active agent shows green, others show their real status
-                status = "active" if is_active else agent_state.status
+                # Active agent: green if idle, otherwise show busy/blocked
+                if is_active and agent_state.status == "idle":
+                    status = "active"
+                else:
+                    status = agent_state.status
                 item = AgentItem(agent_state.name, i, status=status, 
                                 active=is_active, messages=agent_state.messages)
                 list_view.append(item)
@@ -855,20 +892,35 @@ class Sidebar(App):
             # Get the currently active pane (from store)
             current_pane = self._tracked_panes[state.active_index] if 0 <= state.active_index < len(self._tracked_panes) else None
             
-            if current_pane and self._sidebar_pane:
-                # Batch: break current, join target, resize, return to sidebar
+            # Check if target pane still exists
+            if not target_pane.pane_exists():
+                self._show_notification(f"Pane {target_pane.name} no longer exists")
+                return
+            
+            # Check if target is already in main window (nothing to do)
+            if target_pane.is_in_main_window():
+                target_pane.select()
+                self._store.set_active_agent(index)
+                self._show_notification(f"Focused {target_pane.name}")
+                return
+            
+            # Only break current if it's in main window (visible)
+            should_break_current = current_pane and current_pane.is_in_main_window()
+            
+            if should_break_current and self._sidebar_pane:
+                # Batch: break current, join target, resize, focus
                 tmux.run_command(
                     f'break-pane -d -s {current_pane.pane_id} \\; '
                     f'join-pane -h -s {target_pane.pane_id} -t {self._sidebar_pane.pane_id} \\; '
                     f'resize-pane -t 0 -x 20% \\; '
-                    f'select-pane -t 1'  # Focus the agent pane
+                    f'select-pane -t 1'
                 )
             elif self._sidebar_pane:
-                # No visible pane to break, just join target
+                # Just join target (nothing visible to break)
                 tmux.run_command(
                     f'join-pane -h -s {target_pane.pane_id} -t {self._sidebar_pane.pane_id} \\; '
                     f'resize-pane -t 0 -x 20% \\; '
-                    f'select-pane -t 1'  # Focus the agent pane
+                    f'select-pane -t 1'
                 )
             
             # Update active via store (triggers UI update)

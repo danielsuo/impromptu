@@ -192,7 +192,7 @@ class GeminiAgent(Agent):
                     line = line.strip()
                     if line.startswith(f"{self.uuid}="):
                         session_id = line.split("=", 1)[1]
-                        break
+                        break  # 1:1 mapping, only one entry per agent
         except Exception:
             return None
         
@@ -206,8 +206,7 @@ class GeminiAgent(Agent):
         
         session_prefix = session_id[:8]
         for f in session_dir.glob(f"session-*-{session_prefix}.json"):
-            if str(f) not in _claimed_sessions:
-                return f
+            return f  # Return even if claimed since this is hook-based (most reliable)
         
         return None
     

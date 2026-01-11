@@ -46,6 +46,15 @@ class TrackedPane:
             return result.stdout.strip()
         return None
     
+    def pane_exists(self) -> bool:
+        """Check if this pane still exists in tmux."""
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", self.pane_id, "#{pane_id}"],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+    
     def is_in_main_window(self) -> bool:
         """Check if this pane is in the main window (window 0)."""
         window = self.get_window()

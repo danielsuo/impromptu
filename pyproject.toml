@@ -8,6 +8,7 @@ dependencies = [
     "aiohttp>=3.13.3",
     "platformdirs>=4.5.1",
     "textual>=7.0.3",
+    "watchdog>=6.0.0",
 ]
 
 [project.scripts]

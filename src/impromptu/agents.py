@@ -5,21 +5,28 @@ import time
 from pathlib import Path
 from typing import Optional, Callable
 
+from .state_provider import AgentState, get_gemini_state_provider
+
 
 class SessionWatcher:
     """Watches a session file for changes and fetches last messages efficiently.
     
     Only re-reads the file when it changes (based on size/mtime).
     Does not store message history - just fetches last N on demand.
+    
+    Uses hook-based state provider for accurate status detection,
+    with fallback to message-based detection if hooks aren't enabled.
     """
     
-    def __init__(self, session_path: Path, on_change: Optional[Callable[[], None]] = None):
+    def __init__(self, session_path: Path, agent_id: Optional[str] = None, on_change: Optional[Callable[[], None]] = None):
         self.session_path = session_path
+        self.agent_id = agent_id
         self.on_change = on_change
         self._last_size = 0
         self._last_mtime = 0.0
         self._cached_last_messages: list[str] = []
         self._cached_status: str = "idle"
+        self._state_provider = get_gemini_state_provider()
     
     def has_changed(self) -> bool:
         """Check if file has changed since last check."""
@@ -90,42 +97,18 @@ class SessionWatcher:
                     prefix = "▸" if msg_type == "user" else "◂"
                     self._cached_last_messages.append(f"{prefix} {content}")
             
-            # Determine status from last message and activity
+            # Determine status from last message type
+            # Simple logic: if last message is from user, we're busy/thinking
+            #               if last message is from gemini, we're idle (ready for input)
             if messages:
                 last_msg = messages[-1]
                 last_type = last_msg.get("type", "")
                 
-                # Check for pending tool calls (gemini is executing tools)
-                tool_calls = last_msg.get("toolCalls", [])
-                has_pending_tools = any(
-                    tc.get("status") == "pending" for tc in tool_calls
-                )
-                
-                # Check for recent thoughts (within 30s = actively thinking)
-                thoughts = last_msg.get("thoughts", [])
-                has_recent_thoughts = False
-                if thoughts:
-                    try:
-                        from datetime import datetime
-                        for thought in thoughts:
-                            ts = thought.get("timestamp", "")
-                            if ts:
-                                if ts.endswith('Z'):
-                                    ts = ts[:-1] + '+00:00'
-                                thought_time = datetime.fromisoformat(ts)
-                                thought_age = time.time() - thought_time.timestamp()
-                                if thought_age < 30:
-                                    has_recent_thoughts = True
-                                    break
-                    except Exception:
-                        pass
-                
-                # Status logic (no time threshold, based on last message):
-                # - "thinking": user sent message OR pending tools OR recent thoughts
-                # - "ready": gemini responded, waiting for user input
-                if last_type == "user" or has_pending_tools or has_recent_thoughts:
+                if last_type == "user":
+                    # User sent message, agent should be processing
                     self._cached_status = "thinking"
                 elif last_type == "gemini":
+                    # Agent responded, waiting for user
                     self._cached_status = "ready"
                 else:
                     self._cached_status = "idle"
@@ -142,8 +125,21 @@ class SessionWatcher:
     
     @property
     def status(self) -> str:
-        """Get cached status (no file I/O)."""
-        return self._cached_status
+        """Get agent status from hooks only.
+        
+        Returns:
+            - "busy": Agent is processing (yellow)
+            - "blocked": Waiting for user input to continue (red)
+            - "idle": Waiting for user, not blocked (white)
+        """
+        # Hook-based state only - no fallback
+        if self.agent_id:
+            hook_state = self._state_provider.get_state(self.agent_id)
+            if hook_state == AgentState.BUSY:
+                return "busy"
+            elif hook_state == AgentState.BLOCKED:
+                return "blocked"
+        return "idle"
 
 
 class LogWatcher:
