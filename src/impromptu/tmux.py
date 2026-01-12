@@ -394,7 +394,67 @@ def resize_pane(pane_id: str, width: Optional[str] = None, height: Optional[str]
 
 def run_command(command: str) -> None:
     """Run an arbitrary tmux command."""
-    subprocess.run(f"tmux {command}", shell=True, check=True)
+    with open("/tmp/impromptu_debug.log", "a") as _f:
+        _f.write(f"RUN_CMD: tmux {command}\n")
+    try:
+        result = subprocess.run(f"tmux {command}", shell=True, check=True, capture_output=True, text=True)
+        with open("/tmp/impromptu_debug.log", "a") as _f:
+            _f.write("RUN_CMD: SUCCESS\n")
+    except subprocess.CalledProcessError as e:
+        with open("/tmp/impromptu_debug.log", "a") as _f:
+            _f.write(f"RUN_CMD FAILED: {e}\n")
+            _f.write(f"STDOUT: {e.stdout}\n")
+            _f.write(f"STDERR: {e.stderr}\n")
+        raise
+
+
+def split_window_with_command(
+    direction: str = "-h",
+    target: str = "0",
+    command: str = "",
+    env: dict[str, str] | None = None
+) -> None:
+    """Split window and run a command.
+    
+    TMux runs commands through the user's default shell.
+    
+    Args:
+        direction: -h for horizontal, -v for vertical
+        target: Target pane
+        command: Shell command to run in the new pane
+        env: Environment variables to set (e.g., {"IMPROMPTU_AGENT_ID": "xxx"})
+    """
+    # Build base command as list
+    cmd = ["tmux", "split-window", direction, "-t", target]
+    
+    if command or env:
+        # Build the full command string
+        parts = []
+        if env:
+            for key, value in env.items():
+                parts.append(f"export {key}={value}")
+        if command:
+            parts.append(command)
+        
+        full_cmd = "; ".join(parts)
+        
+        # Use interactive shell (-i) so shell functions like hgd work
+        import os as _os
+        user_shell = _os.environ.get("SHELL", "/bin/bash")
+        cmd.extend([user_shell, "-i", "-c", full_cmd])
+    
+    with open("/tmp/impromptu_debug.log", "a") as _f:
+        _f.write(f"CMD: {cmd}\n")
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        with open("/tmp/impromptu_debug.log", "a") as _f:
+            _f.write("SUCCESS\n")
+    except subprocess.CalledProcessError as e:
+        with open("/tmp/impromptu_debug.log", "a") as _f:
+            _f.write(f"FAILED: {e}\n")
+            _f.write(f"STDOUT: {e.stdout}\n")
+            _f.write(f"STDERR: {e.stderr}\n")
+        raise
 
 
 def get_pane_id(pane_target: str = "") -> Optional[str]:

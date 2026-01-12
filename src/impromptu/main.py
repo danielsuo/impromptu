@@ -18,6 +18,7 @@ from .agents import SessionWatcher, LogWatcher
 from .models import AgentType, GeminiAgent
 from .state import StateStore, UIState
 from .theme import get_colors, DEFAULT_THEME
+from .setup_modal import SetupCommandModal
 from .hooks import install_hooks
 from .file_watcher import get_session_watcher, SessionDirectoryWatcher
 
@@ -48,7 +49,7 @@ class AgentSelectModal(ModalScreen[tuple[str, str] | None]):
     }}
     
     #modal-container {{
-        width: 40;
+        width: 90%;
         height: auto;
         max-height: 20;
         background: {c.surface};
@@ -149,7 +150,7 @@ class ShortcutsModal(ModalScreen[None]):
     }}
     
     #shortcuts-container {{
-        width: 40;
+        width: 90%;
         height: auto;
         max-height: 28;
         background: {c.surface};
@@ -265,7 +266,7 @@ class RenameModal(ModalScreen[str | None]):
     }}
     
     #rename-container {{
-        width: 40;
+        width: 90%;
         height: auto;
         background: {c.surface};
         border: thick {c.primary};
@@ -315,6 +316,114 @@ class RenameModal(ModalScreen[str | None]):
     def action_cancel(self) -> None:
         """Cancel the rename."""
         self.dismiss(None)
+
+
+class QuitConfirmModal(ModalScreen[bool]):
+    """Modal to confirm quitting impromptu."""
+    
+    @property
+    def CSS(self) -> str:
+        c = get_colors()
+        return f"""
+    QuitConfirmModal {{
+        align: center middle;
+        background: rgba(0, 0, 0, 0.6);
+    }}
+    
+    #quit-container {{
+        width: 90%;
+        height: auto;
+        background: {c.surface};
+        border: thick {c.warning};
+        padding: 1 2;
+    }}
+    
+    #quit-title {{
+        text-style: bold;
+        text-align: center;
+        padding-bottom: 1;
+        color: {c.warning};
+    }}
+    
+    #quit-message {{
+        text-align: center;
+        padding: 1 0;
+        color: {c.text};
+    }}
+    
+    #button-row {{
+        height: auto;
+        width: 100%;
+        align: center middle;
+        padding-top: 1;
+    }}
+    
+    .quit-button {{
+        width: 40%;
+        min-width: 6;
+        margin: 0 1;
+    }}
+    
+    #btn-no {{
+        background: {c.primary};
+    }}
+    
+    #btn-yes {{
+        background: {c.surface};
+        border: solid {c.warning};
+    }}
+    
+    .quit-button:focus {{
+        background: {c.selection_bg};
+    }}
+    """
+    
+    BINDINGS = [
+        ("y", "confirm", "Yes"),
+        ("n", "cancel", "No"),
+        ("escape", "cancel", "Cancel"),
+        ("left", "focus_previous", "Left"),
+        ("right", "focus_next", "Right"),
+        ("h", "focus_previous", "Left"),
+        ("l", "focus_next", "Right"),
+    ]
+    
+    def compose(self) -> ComposeResult:
+        from textual.widgets import Button
+        from textual.containers import Horizontal
+        with Vertical(id="quit-container"):
+            yield Static("⚠ Quit Impromptu?", id="quit-title")
+            yield Static("This will kill all agent panes.", id="quit-message")
+            with Horizontal(id="button-row"):
+                yield Button("Yes", id="btn-yes", classes="quit-button")
+                yield Button("No", id="btn-no", classes="quit-button")
+    
+    def on_mount(self) -> None:
+        """Focus No button by default."""
+        self.query_one("#btn-no").focus()
+    
+    def on_button_pressed(self, event) -> None:
+        """Handle button press."""
+        if event.button.id == "btn-yes":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+    
+    def action_confirm(self) -> None:
+        """Confirm quit."""
+        self.dismiss(True)
+    
+    def action_cancel(self) -> None:
+        """Cancel quit."""
+        self.dismiss(False)
+    
+    def action_focus_previous(self) -> None:
+        """Focus previous button."""
+        self.focus_previous()
+    
+    def action_focus_next(self) -> None:
+        """Focus next button."""
+        self.focus_next()
 
 
 class NotificationArea(Static):
@@ -522,7 +631,10 @@ class Sidebar(App):
         ("5", "switch_agent(4)", "5"),
         ("tab", "focus_agent_pane", "Focus"),
         ("R", "refresh", "Refresh"),
-        ("d", "debug", "Debug"),
+        ("d", "detach", "Detach"),
+        ("alt+d", "detach", "Detach"),
+        ("q", "quit_app", "Quit"),
+        ("alt+q", "quit_app", "Quit"),
         ("w", "close_agent", "Close"),
         # Navigation bindings (hidden from footer)
         ("j", "cursor_down"),
@@ -687,8 +799,14 @@ class Sidebar(App):
         
         # Alt+r sends 'r' key to sidebar (rename agent)
         tmux.run_command('bind-key -n M-r "select-pane -t 0 ; send-keys r"')
+        
+        # Alt+d detaches from tmux session (global)
+        tmux.run_command('bind-key -n M-d detach-client')
+        
+        # Alt+q sends 'q' to sidebar for quit confirmation
+        tmux.run_command('bind-key -n M-q "select-pane -t 0 ; send-keys q"')
     
-    def _create_agent(self, name: str, command: str, is_first: bool = False) -> Optional[GeminiAgent]:
+    def _create_agent(self, name: str, command: str, is_first: bool = False, setup_cmd: str = "") -> Optional[GeminiAgent]:
         """Create a new agent with proper session tracking.
         
         Args:
@@ -706,8 +824,8 @@ class Sidebar(App):
         project_dir = os.getcwd()
         agent = GeminiAgent(id=agent_uuid, name=name, pane_id=None)
         agent.init(project_dir)
-        # Check if command exists
-        if not shutil.which(command.split()[0]):
+        # Check if command exists (skip for empty command - uses default shell)
+        if command and not shutil.which(command.split()[0]):
             self._show_notification(f"Error: Command not found: {command}")
             return None
 
@@ -715,18 +833,40 @@ class Sidebar(App):
         
         # Create the pane and run command via shell to inherit environment
         if is_first:
-            # Pass command directly to split-window with environment variable
-            tmux.run_command(
-                f'split-window -h -t 0 "IMPROMPTU_AGENT_ID={agent.uuid} {command}"'
+            # Build command with proper escaping via list-based subprocess
+            if command:
+                # Use exec so interactive commands replace the shell
+                full_cmd = f"{setup_cmd} && exec {command}" if setup_cmd else command
+            else:
+                full_cmd = f"{setup_cmd}; exec $SHELL" if setup_cmd else ""
+            
+            tmux.split_window_with_command(
+                direction="-h",
+                target="0",
+                command=full_cmd,
+                env={"IMPROMPTU_AGENT_ID": agent.uuid},
+
             )
             tmux.run_command('resize-pane -t 0 -x 20%')
         else:
             visible_pane = self._get_visible_pane()
             if not visible_pane:
                 return None
-            tmux.run_command(
-                f'split-window -v -t {visible_pane.pane_id} "IMPROMPTU_AGENT_ID={agent.uuid} {command}"'
+            # Build command with proper escaping via list-based subprocess
+            if command:
+                # Use exec so interactive commands replace the shell
+                full_cmd = f"{setup_cmd} && exec {command}" if setup_cmd else command
+            else:
+                full_cmd = f"{setup_cmd}; exec $SHELL" if setup_cmd else ""
+            
+            # Create new pane by splitting from current visible one
+            tmux.split_window_with_command(
+                direction="-v",
+                target=visible_pane.pane_id,
+                command=full_cmd,
+                env={"IMPROMPTU_AGENT_ID": agent.uuid}
             )
+            # Break the OLD visible pane to a hidden window, leaving new pane as main
             tmux.run_command(f'break-pane -d -s {visible_pane.pane_id}')
             tmux.run_command('resize-pane -t 0 -x 20%')
             tmux.run_command('select-pane -t 1')
@@ -940,13 +1080,21 @@ class Sidebar(App):
     def _on_agent_selected(self, result: tuple[str, str] | None) -> None:
         """Handle agent selection from modal."""
         if result is None:
-            # User cancelled
             return
         
         agent_name, agent_command = result
-        self._create_agent_pane(agent_name, agent_command)
+        self._pending_agent = (agent_name, agent_command)
+        self.push_screen(SetupCommandModal(agent_name), self._on_setup_command)
     
-    def _create_agent_pane(self, agent_name: str, agent_command: str) -> None:
+    def _on_setup_command(self, setup_cmd: str) -> None:
+        """Handle setup command from modal, then create agent."""
+        if not hasattr(self, "_pending_agent"):
+            return
+        agent_name, agent_command = self._pending_agent
+        del self._pending_agent
+        self._create_agent_pane(agent_name, agent_command, setup_cmd)
+    
+    def _create_agent_pane(self, agent_name: str, agent_command: str, setup_cmd: str = "") -> None:
         """Create a new agent pane with the given command."""
         try:
             # Determine display name for new agent
@@ -956,7 +1104,7 @@ class Sidebar(App):
                 count = sum(1 for p in self._tracked_panes if p.name.startswith(agent_name))
                 display_name = f"{agent_name}-{count + 1}" if count > 0 else agent_name
             
-            agent = self._create_agent(display_name, agent_command, is_first=False)
+            agent = self._create_agent(display_name, agent_command, is_first=False, setup_cmd=setup_cmd)
             
             if agent:
                 self._pause_polling(3.0)
@@ -1038,10 +1186,19 @@ class Sidebar(App):
         self._refresh_list()
         self._show_notification("Refreshed")
     
-    def action_debug(self) -> None:
-        """Show debug info about tracked panes."""
-        info = self._debug_panes()
-        self._show_notification(info)
+    def action_detach(self) -> None:
+        """Detach from the tmux session (keeps all panes running)."""
+        tmux.run_command("detach-client")
+    
+    def action_quit_app(self) -> None:
+        """Show quit confirmation modal."""
+        self.push_screen(QuitConfirmModal(), self._on_quit_confirm)
+    
+    def _on_quit_confirm(self, confirmed: bool) -> None:
+        """Handle quit confirmation result."""
+        if confirmed:
+            # Kill the entire tmux session (this will terminate all panes)
+            tmux.run_command("kill-session")
     
     def action_show_shortcuts(self) -> None:
         """Show the keyboard shortcuts modal."""
@@ -1138,6 +1295,15 @@ class Sidebar(App):
 
 def main():
     """Main entry point - orchestrates tmux and runs sidebar."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Impromptu - Multi-agent TUI manager")
+    parser.add_argument("session", nargs="?", default=None,
+                        help="Session name to create or attach to (default: impromptu)")
+    parser.add_argument("--inside-tmux", action="store_true", 
+                        help=argparse.SUPPRESS)  # Internal flag
+    args = parser.parse_args()
+    
     config = load_config()
 
     # Check if tmux is available
@@ -1149,10 +1315,13 @@ def main():
 
     # If not inside tmux, create session and re-run inside it
     if not tmux.is_inside_tmux():
-        session_name = tmux.SESSION_NAME
+        session_name = args.session or tmux.SESSION_NAME
 
-        # Kill existing session if any
-        tmux.kill_session(session_name)
+        # Check if session already exists - if so, just attach
+        if tmux.session_exists(session_name):
+            print(f"Attaching to existing session: {session_name}")
+            subprocess.run(["tmux", "attach-session", "-t", session_name])
+            return
 
         # Create new session running this script
         subprocess.run([
@@ -1188,28 +1357,7 @@ def main():
             # Resize sidebar to 20% of current window
             tmux.resize_pane("0", width="20%")
 
-            # Register keybindings
-            kb = config.keybindings
-            print(f"DEBUG: Registering keybindings: {kb}", file=sys.stderr)
-            
-            # Alt+s focuses sidebar (pane 0) - main way to get back to sidebar
-            try:
-                tmux.bind_key(kb.get("sidebar", "M-i"), "select-pane -t 0")
-                print("DEBUG: Registered sidebar keybinding", file=sys.stderr)
-            except Exception as e:
-                print(f"DEBUG: Failed to register sidebar: {e}", file=sys.stderr)
-            
-            # Alt+n sends 'n' key to sidebar (creating new agent via sidebar)
-            tmux.run_command(f'bind-key -n {kb.get("new_agent", "M-n")} "select-pane -t 0 ; send-keys n"')
-            
-            # Alt+1/2/3/4/5 switch to agents and focus agent pane
-            for i in range(1, 6):
-                key = kb.get(f"switch_{i}", f"M-{i}")
-                # Send number to sidebar to switch, then focus agent pane
-                tmux.run_command(f'bind-key -n {key} "select-pane -t 0 ; send-keys {i} ; select-pane -t 1"')
-            
-            # Alt+r sends 'r' key to sidebar (rename agent via sidebar)
-            tmux.run_command('bind-key -n M-r "select-pane -t 0 ; send-keys r"')
+            # Keybindings are registered in Sidebar.on_mount() -> _register_keybindings()
 
             # Focus agent pane (pane 1) to start in agent view
             tmux.select_pane("1")
