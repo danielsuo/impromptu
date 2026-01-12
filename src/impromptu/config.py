@@ -4,7 +4,6 @@ import os
 import tomllib
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Literal
 
 from platformdirs import user_config_dir
 
@@ -43,14 +42,13 @@ duration_seconds = 5
 [layout]
 sidebar_width = 25
 
-[agents]
-# Agent name = command to run
-gemini = "gemini"
-# claude = "claude --chat"
+[[agents]]
+name = "gemini"
+path = "/google/bin/releases/gemini-cli/tools/gemini"
+flags = "--yolo"
+agent_type = "gemini"
 
 [keybindings]
-# Key = pane index or tmux command
-# M- = Alt, C- = Ctrl
 switch_1 = "M-1"
 switch_2 = "M-2"
 switch_3 = "M-3"
@@ -60,52 +58,39 @@ new_agent = "M-n"
 
 
 @dataclass
-class AppearanceConfig:
+class Config:
+    """Flat configuration holding all settings."""
+    # Appearance
     dark_mode: bool = True
-
-
-@dataclass
-class BehaviorConfig:
+    
+    # Behavior
     show_header: bool = True
     show_footer: bool = True
-
-
-@dataclass
-class NotificationsConfig:
-    enabled: bool = True
-    sound: bool = False
-    duration_seconds: int = 5
-
-
-@dataclass
-class LayoutConfig:
+    
+    # Notifications
+    notifications_enabled: bool = True
+    notifications_sound: bool = False
+    notifications_duration: int = 5
+    
+    # Layout
     sidebar_width: int = 25
-
-
-@dataclass
-class AgentsConfig:
-    agents: dict[str, str] = field(default_factory=lambda: {"gemini": "gemini"})
-
-
-@dataclass
-class KeybindingsConfig:
-    switch_1: str = "M-1"
-    switch_2: str = "M-2"
-    switch_3: str = "M-3"
-    switch_4: str = "M-4"
-    switch_5: str = "M-5"
-    sidebar: str = "M-s"
-    new_agent: str = "M-n"
-
-
-@dataclass
-class Config:
-    appearance: AppearanceConfig = field(default_factory=AppearanceConfig)
-    behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
-    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
-    layout: LayoutConfig = field(default_factory=LayoutConfig)
-    agents: AgentsConfig = field(default_factory=AgentsConfig)
-    keybindings: KeybindingsConfig = field(default_factory=KeybindingsConfig)
+    
+    # Agents - list of raw TOML tables (dicts)
+    agents: list[dict] = field(default_factory=list)
+    
+    # Keybindings
+    keybindings: dict[str, str] = field(default_factory=dict)
+    
+    def get_agent_names(self) -> list[str]:
+        """Get list of configured agent names."""
+        return [a.get("name", "unnamed") for a in self.agents]
+    
+    def get_agent_table(self, name: str) -> dict | None:
+        """Get agent config table by name."""
+        for agent in self.agents:
+            if agent.get("name") == name:
+                return agent
+        return None
 
 
 def load_config() -> Config:
@@ -120,39 +105,37 @@ def load_config() -> Config:
     with open(config_file, "rb") as f:
         data = tomllib.load(f)
 
-    appearance_data = data.get("appearance", {})
-    behavior_data = data.get("behavior", {})
-    notifications_data = data.get("notifications", {})
-    layout_data = data.get("layout", {})
-    agents_data = data.get("agents", {})
-    keybindings_data = data.get("keybindings", {})
+    appearance = data.get("appearance", {})
+    behavior = data.get("behavior", {})
+    notifications = data.get("notifications", {})
+    layout = data.get("layout", {})
+    agents = data.get("agents", [])
+    keybindings = data.get("keybindings", {})
+    
+    # Ensure agents is a list (handles old format)
+    if isinstance(agents, dict):
+        # Convert old {name: cmd} format to new format
+        agents = [{"name": k, "path": v, "agent_type": "shell"} for k, v in agents.items()]
+    
+    # Default agent if none configured
+    if not agents:
+        agents = [{
+            "name": "gemini",
+            "path": "/google/bin/releases/gemini-cli/tools/gemini",
+            "flags": "--yolo",
+            "agent_type": "gemini"
+        }]
 
     return Config(
-        appearance=AppearanceConfig(
-            dark_mode=appearance_data.get("dark_mode", True),
-        ),
-        behavior=BehaviorConfig(
-            show_header=behavior_data.get("show_header", True),
-            show_footer=behavior_data.get("show_footer", True),
-        ),
-        notifications=NotificationsConfig(
-            enabled=notifications_data.get("enabled", True),
-            sound=notifications_data.get("sound", False),
-            duration_seconds=notifications_data.get("duration_seconds", 5),
-        ),
-        layout=LayoutConfig(
-            sidebar_width=layout_data.get("sidebar_width", 25),
-        ),
-        agents=AgentsConfig(
-            agents=agents_data if agents_data else {"gemini": "gemini"},
-        ),
-        keybindings=KeybindingsConfig(
-            switch_1=keybindings_data.get("switch_1", "M-1"),
-            switch_2=keybindings_data.get("switch_2", "M-2"),
-            switch_3=keybindings_data.get("switch_3", "M-3"),
-            sidebar=keybindings_data.get("sidebar", "M-s"),
-            new_agent=keybindings_data.get("new_agent", "M-n"),
-        ),
+        dark_mode=appearance.get("dark_mode", True),
+        show_header=behavior.get("show_header", True),
+        show_footer=behavior.get("show_footer", True),
+        notifications_enabled=notifications.get("enabled", True),
+        notifications_sound=notifications.get("sound", False),
+        notifications_duration=notifications.get("duration_seconds", 5),
+        sidebar_width=layout.get("sidebar_width", 25),
+        agents=agents,
+        keybindings=keybindings,
     )
 
 

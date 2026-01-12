@@ -305,11 +305,9 @@ def bind_key(key: str, command: str, no_prefix: bool = True) -> None:
         command: tmux command to run
         no_prefix: If True, key works without prefix (Ctrl-b)
     """
-    cmd = ["tmux", "bind-key"]
-    if no_prefix:
-        cmd.append("-n")
-    cmd.extend([key, command])
-    subprocess.run(cmd, check=True)
+    prefix = "-n " if no_prefix else ""
+    full_cmd = f'tmux bind-key {prefix}{key} "{command}"'
+    subprocess.run(full_cmd, shell=True, check=True)
 
 
 def unbind_key(key: str, no_prefix: bool = True) -> None:

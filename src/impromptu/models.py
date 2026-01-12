@@ -48,6 +48,7 @@ class Agent:
     name: str
     agent_type: AgentType = AgentType.GENERIC
     pane_id: Optional[str] = None  # tmux pane ID
+    _command: str = ""  # Command to launch this agent
     status: AgentStatus = AgentStatus.IDLE
     thinking: str = ""  # Current thinking stream
     context: list[ContextItem] = field(default_factory=list)
@@ -72,6 +73,38 @@ class Agent:
     def get_cli_command(self) -> str:
         """Get command to launch this agent's CLI. Override in subclasses."""
         return ""
+    
+    @classmethod
+    def from_config(cls, table: dict) -> "Agent":
+        """Factory method to create an agent from a TOML config table.
+        
+        Args:
+            table: Dict with keys: name, path, flags (optional), agent_type
+            
+        Returns:
+            Appropriate Agent subclass based on agent_type
+        """
+        import uuid as uuid_module
+        
+        name = table.get("name", "unnamed")
+        path = table.get("path", "bash")
+        flags = table.get("flags", "")
+        agent_type = table.get("agent_type", "shell")
+        
+        # Build command
+        command = f"{path} {flags}".strip() if flags else path
+        
+        agent_id = str(uuid_module.uuid4())
+        
+        if agent_type == "gemini":
+            agent = GeminiAgent(id=agent_id, name=name, pane_id=None)
+            agent._command = command
+            return agent
+        else:
+            # Generic shell agent
+            agent = Agent(id=agent_id, name=name, pane_id=None)
+            agent._command = command
+            return agent
 
 
 

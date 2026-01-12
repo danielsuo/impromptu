@@ -3,6 +3,7 @@
 import os
 import sys
 import subprocess
+import shutil
 from pathlib import Path
 from typing import Optional
 from textual.app import App, ComposeResult
@@ -190,24 +191,61 @@ class ShortcutsModal(ModalScreen[None]):
         ("question_mark", "close", "Close"),
     ]
     
+    # Human-readable descriptions for actions
+    ACTION_DESCRIPTIONS = {
+        "new_agent": "New agent",
+        "rename_agent": "Rename",
+        "import_agent": "Import pane",
+        "close_agent": "Close agent",
+        "focus_agent_pane": "Focus pane",
+        "refresh": "Refresh",
+        "show_shortcuts": "Help",
+        "cursor_down": "Move down",
+        "cursor_up": "Move up",
+    }
+    
     def compose(self) -> ComposeResult:
         with Vertical(id="shortcuts-container"):
             yield Static("⌨ Keyboard Shortcuts", id="shortcuts-title")
             
+            # Get bindings from Sidebar class
+            from . import main as main_module
+            bindings = getattr(main_module.Sidebar, 'BINDINGS', [])
+            
+            # Group bindings by category
+            nav_keys = []
+            agent_keys = []
+            for binding in bindings:
+                if len(binding) < 3:
+                    continue  # Skip hidden bindings without description
+                key, action, desc = binding[0], binding[1], binding[2]
+                # Clean up key names
+                display_key = key.replace("question_mark", "?")
+                # Get action name (strip parameters)
+                action_name = action.split("(")[0]
+                # Use our descriptions or fallback to provided desc
+                display_desc = self.ACTION_DESCRIPTIONS.get(action_name, desc)
+                
+                # Categorize
+                if action_name in ("cursor_down", "cursor_up", "focus_agent_pane"):
+                    nav_keys.append((display_key, display_desc))
+                elif action_name.startswith("switch_agent"):
+                    continue  # Handle separately
+                else:
+                    agent_keys.append((display_key, display_desc))
+            
             yield Static("Navigation", classes="shortcut-section")
-            yield Static("j / ↓    Move down", classes="shortcut-row")
-            yield Static("k / ↑    Move up", classes="shortcut-row")
-            yield Static("Enter    Select agent", classes="shortcut-row")
+            yield Static("j/k      Move up/down", classes="shortcut-row")
             yield Static("Tab      Focus pane", classes="shortcut-row")
+            yield Static("Enter    Select agent", classes="shortcut-row")
             
             yield Static("Agents", classes="shortcut-section")
-            yield Static("n        New agent", classes="shortcut-row")
-            yield Static("r        Rename agent", classes="shortcut-row")
-            yield Static("i        Import pane", classes="shortcut-row")
+            for key, desc in agent_keys:
+                yield Static(f"{key:<8} {desc}", classes="shortcut-row")
             yield Static("1-5      Switch to #", classes="shortcut-row")
             
             yield Static("", classes="shortcut-section")
-            yield Static("Esc / ?  Close help", classes="shortcut-row")
+            yield Static("Esc/?    Close help", classes="shortcut-row")
     
     def action_close(self) -> None:
         """Close the modal."""
@@ -431,9 +469,8 @@ class Sidebar(App):
     }}
     
     .agent-message {{
-        color: {c.text_muted};
-        padding-left: 3;
-        text-style: italic;
+        color: {c.text};
+        padding-left: 2;
     }}
     
     ListItem.active-agent .agent-header {{
@@ -486,6 +523,7 @@ class Sidebar(App):
         ("tab", "focus_agent_pane", "Focus"),
         ("R", "refresh", "Refresh"),
         ("d", "debug", "Debug"),
+        ("w", "close_agent", "Close"),
         # Navigation bindings (hidden from footer)
         ("j", "cursor_down"),
         ("k", "cursor_up"),
@@ -496,7 +534,7 @@ class Sidebar(App):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        self._agents: list[tuple[str, str]] = []  # (name, command) pairs from config
+        self._agents: list[tuple[str, str]] = []  # (name, command) pairs for modal
         self._tracked_panes: list[tmux.TrackedPane] = []  # Tracked agent panes
         self._sidebar_pane: tmux.TrackedPane | None = None  # Sidebar pane (always visible)
         self._poll_timer: Timer | None = None
@@ -508,6 +546,18 @@ class Sidebar(App):
         self._store = StateStore()
         self._store.subscribe(self._on_state_change)
     
+    def _get_agent_command(self, name: str) -> str:
+        """Get the command for an agent name from config."""
+        base_name = name.split('-')[0] if '-' in name else name
+        table = self.config.get_agent_table(base_name)
+        return self._build_command(table) if table else "bash"
+    
+    def _build_command(self, table: dict) -> str:
+        """Build command string from agent config table."""
+        path = table.get("path", "bash")
+        flags = table.get("flags", "")
+        return f"{path} {flags}".strip() if flags else path
+
     def _pause_polling(self, duration: float = 3.0) -> None:
         """Pause status polling for a duration after pane operations."""
         self._polling_paused = True
@@ -557,11 +607,10 @@ class Sidebar(App):
         # Install Gemini hooks globally if ~/.gemini exists
         install_hooks()
         
-        self.dark = self.config.appearance.dark_mode
+        self.dark = self.config.dark_mode
 
-        # Build agent list from config
-        agents = self.config.agents.agents
-        self._agents = list(agents.items())
+        # Build agent list from config (list of dicts)
+        self._agents = [(a.get("name", "unnamed"), self._build_command(a)) for a in self.config.agents]
         
         # Get sidebar pane ID
         sidebar_id = tmux.get_pane_id("0")
@@ -581,8 +630,14 @@ class Sidebar(App):
             tmux.run_command(f'kill-pane -t {existing_pane}')
         
         # Create initial agent
-        first_name = self._agents[0][0] if self._agents else "IMPROMPTU_AGENT_ID={agent.uuid} gemini"
-        self._create_agent(first_name, is_first=True)
+        if self._agents:
+            first_name, first_cmd = self._agents[0]
+        else:
+            first_name, first_cmd = "gemini", "bash"
+        self._create_agent(first_name, first_cmd, is_first=True)
+        
+        # Register tmux keybindings
+        self._register_keybindings()
         
         # Start file watcher for instant updates on file changes
         self._file_watcher = get_session_watcher(self._on_file_change)
@@ -615,7 +670,25 @@ class Sidebar(App):
         # force=True skips mtime check since we know file just changed
         self.call_from_thread(lambda: self._update_all_agents(force=True))
     
-    def _create_agent(self, name: str, is_first: bool = False) -> Optional[GeminiAgent]:
+    def _register_keybindings(self) -> None:
+        """Register tmux keybindings for this session."""
+        kb = self.config.keybindings
+        
+        # Alt+i focuses sidebar (pane 0)
+        tmux.run_command(f'bind-key -n {kb.get("sidebar", "M-i")} select-pane -t 0')
+        
+        # Alt+n sends 'n' key to sidebar (creating new agent)
+        tmux.run_command(f'bind-key -n {kb.get("new_agent", "M-n")} "select-pane -t 0 ; send-keys n"')
+        
+        # Alt+1/2/3/4/5 switch to agents and focus agent pane
+        for i in range(1, 6):
+            key = kb.get(f"switch_{i}", f"M-{i}")
+            tmux.run_command(f'bind-key -n {key} "select-pane -t 0 ; send-keys {i} ; select-pane -t 1"')
+        
+        # Alt+r sends 'r' key to sidebar (rename agent)
+        tmux.run_command('bind-key -n M-r "select-pane -t 0 ; send-keys r"')
+    
+    def _create_agent(self, name: str, command: str, is_first: bool = False) -> Optional[GeminiAgent]:
         """Create a new agent with proper session tracking.
         
         Args:
@@ -633,26 +706,32 @@ class Sidebar(App):
         project_dir = os.getcwd()
         agent = GeminiAgent(id=agent_uuid, name=name, pane_id=None)
         agent.init(project_dir)
+        # Check if command exists
+        if not shutil.which(command.split()[0]):
+            self._show_notification(f"Error: Command not found: {command}")
+            return None
+
         # Note: agent.created_at is set automatically for session matching
         
-        # Create the pane with gemini
+        # Create the pane and run command via shell to inherit environment
         if is_first:
+            # Pass command directly to split-window with environment variable
             tmux.run_command(
-                f'split-window -h -t 0 "IMPROMPTU_AGENT_ID={agent.uuid} gemini" \\; '
-                f'resize-pane -t 0 -x 20%'
+                f'split-window -h -t 0 "IMPROMPTU_AGENT_ID={agent.uuid} {command}"'
             )
+            tmux.run_command('resize-pane -t 0 -x 20%')
         else:
             visible_pane = self._get_visible_pane()
             if not visible_pane:
                 return None
             tmux.run_command(
-                f'split-window -v -t {visible_pane.pane_id} "IMPROMPTU_AGENT_ID={agent.uuid} gemini" \\; '
-                f'break-pane -d -s {visible_pane.pane_id} \\; '
-                f'resize-pane -t 0 -x 20% \\; '
-                f'select-pane -t 1'
+                f'split-window -v -t {visible_pane.pane_id} "IMPROMPTU_AGENT_ID={agent.uuid} {command}"'
             )
+            tmux.run_command(f'break-pane -d -s {visible_pane.pane_id}')
+            tmux.run_command('resize-pane -t 0 -x 20%')
+            tmux.run_command('select-pane -t 1')
         
-        # Get the new pane's ID
+        # Get the new pane's ID (it's always index 1 in window 0 now)
         new_pane_id = tmux.get_pane_id("1")
         
         if new_pane_id:
@@ -877,7 +956,7 @@ class Sidebar(App):
                 count = sum(1 for p in self._tracked_panes if p.name.startswith(agent_name))
                 display_name = f"{agent_name}-{count + 1}" if count > 0 else agent_name
             
-            agent = self._create_agent(display_name, is_first=False)
+            agent = self._create_agent(display_name, agent_command, is_first=False)
             
             if agent:
                 self._pause_polling(3.0)
@@ -968,6 +1047,44 @@ class Sidebar(App):
         """Show the keyboard shortcuts modal."""
         self.push_screen(ShortcutsModal())
     
+    def action_close_agent(self) -> None:
+        """Close the currently highlighted agent pane."""
+        list_view = self.query_one("#agent-list", ListView)
+        current_index = list_view.index
+        
+        if current_index is None or current_index >= len(self._tracked_panes):
+            self._show_notification("No agent selected")
+            return
+        
+        if len(self._tracked_panes) <= 1:
+            self._show_notification("Cannot close last agent")
+            return
+        
+        pane = self._tracked_panes[current_index]
+        pane_id = pane.pane_id
+        pane_name = pane.name
+        
+        try:
+            # Kill the tmux pane
+            tmux.run_command(f'kill-pane -t {pane_id}')
+            
+            # Remove from tracking
+            del self._tracked_panes[current_index]
+            if pane_id in self._agents_by_pane:
+                del self._agents_by_pane[pane_id]
+            
+            # Update store
+            self._store.remove_agent(pane_id)
+            
+            # Select the previous or first remaining agent
+            new_index = min(current_index, len(self._tracked_panes) - 1)
+            self._store.set_active_agent(new_index)
+            
+            self._refresh_list()
+            self._show_notification(f"Closed {pane_name}")
+        except Exception as e:
+            self._show_notification(f"Failed to close: {e}")
+    
     def action_rename_agent(self) -> None:
         """Show modal to rename the currently highlighted agent."""
         list_view = self.query_one("#agent-list", ListView)
@@ -1056,30 +1173,38 @@ def main():
         try:
             # Get first agent command
             agents = config.agents.agents
-            first_agent_cmd = list(agents.values())[0] if agents else "bash"
+            first_agent_cmd = "bash"
 
             # Small delay to let window settle at full size
             import time
             time.sleep(0.2)
             
             # Create agent pane on the right (85% of full window)
-            tmux.run_command(f'split-window -h -f -l 85% "{first_agent_cmd}"')
+            # Use send-keys to run command in new pane, inheriting shell environment
+            tmux.run_command('split-window -h -f -l 85%')
+            if first_agent_cmd and first_agent_cmd != "bash":
+                tmux.run_command(f'send-keys "{first_agent_cmd}; exit" Enter')
             
             # Resize sidebar to 20% of current window
             tmux.resize_pane("0", width="20%")
 
             # Register keybindings
             kb = config.keybindings
+            print(f"DEBUG: Registering keybindings: {kb}", file=sys.stderr)
             
             # Alt+s focuses sidebar (pane 0) - main way to get back to sidebar
-            tmux.bind_key(kb.sidebar, "select-pane -t 0")
+            try:
+                tmux.bind_key(kb.get("sidebar", "M-i"), "select-pane -t 0")
+                print("DEBUG: Registered sidebar keybinding", file=sys.stderr)
+            except Exception as e:
+                print(f"DEBUG: Failed to register sidebar: {e}", file=sys.stderr)
             
             # Alt+n sends 'n' key to sidebar (creating new agent via sidebar)
-            tmux.run_command(f'bind-key -n {kb.new_agent} "select-pane -t 0 ; send-keys n"')
+            tmux.run_command(f'bind-key -n {kb.get("new_agent", "M-n")} "select-pane -t 0 ; send-keys n"')
             
             # Alt+1/2/3/4/5 switch to agents and focus agent pane
             for i in range(1, 6):
-                key = getattr(kb, f"switch_{i}", f"M-{i}")
+                key = kb.get(f"switch_{i}", f"M-{i}")
                 # Send number to sidebar to switch, then focus agent pane
                 tmux.run_command(f'bind-key -n {key} "select-pane -t 0 ; send-keys {i} ; select-pane -t 1"')
             
