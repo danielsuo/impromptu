@@ -18,501 +18,20 @@ from .agents import SessionWatcher, LogWatcher
 from .models import AgentType, GeminiAgent
 from .state import StateStore, UIState
 from .theme import get_colors, DEFAULT_THEME
-from .setup_modal import SetupCommandModal
+from .ui import (
+    AgentSelectItem,
+    AgentSelectModal,
+    ShortcutsModal,
+    RenameModal,
+    QuitConfirmModal,
+    AgentItem,
+    NotificationArea,
+    SetupCommandModal,
+)
 from .hooks import install_hooks
 from .file_watcher import get_session_watcher, SessionDirectoryWatcher
 
 
-class AgentSelectItem(ListItem):
-    """A list item for agent selection in the modal."""
-
-    def __init__(self, name: str, command: str) -> None:
-        super().__init__()
-        self.agent_name = name
-        self.command = command
-
-    def compose(self) -> ComposeResult:
-        yield Label(f"  {self.agent_name}")
-
-
-class AgentSelectModal(ModalScreen[tuple[str, str] | None]):
-    """Modal for selecting which agent to start in a new pane."""
-    
-    # CSS will be generated dynamically with theme colors
-    @property
-    def CSS(self) -> str:
-        c = get_colors()
-        return f"""
-    AgentSelectModal {{
-        align: center middle;
-        background: rgba(0, 0, 0, 0.6);
-    }}
-    
-    #modal-container {{
-        width: 90%;
-        height: auto;
-        max-height: 20;
-        background: {c.surface};
-        border: thick {c.primary};
-        padding: 1 2;
-    }}
-    
-    #modal-title {{
-        text-style: bold;
-        text-align: center;
-        padding-bottom: 1;
-        color: {c.text};
-    }}
-    
-    #agent-select-list {{
-        height: auto;
-        max-height: 12;
-        background: {c.surface};
-    }}
-    
-    #agent-select-list > ListItem {{
-        padding: 0 1;
-        color: {c.text};
-    }}
-    
-    #agent-select-list > ListItem:hover {{
-        background: {c.primary_dim};
-    }}
-    
-    #agent-select-list > ListItem.--highlight {{
-        background: {c.selection_bg};
-    }}
-    
-    .cancel-item {{
-        color: {c.text_muted};
-    }}
-    """
-    
-    BINDINGS = [
-        ("escape", "cancel", "Cancel"),
-        ("j", "cursor_down", "Down"),
-        ("k", "cursor_up", "Up"),
-        ("ctrl+n", "cursor_down", "Down"),
-        ("ctrl+p", "cursor_up", "Up"),
-    ]
-    
-    def __init__(self, agents: list[tuple[str, str]]) -> None:
-        super().__init__()
-        self.agents = agents  # List of (name, command) tuples
-    
-    def compose(self) -> ComposeResult:
-        with Vertical(id="modal-container"):
-            yield Static("Select Agent", id="modal-title")
-            with ListView(id="agent-select-list"):
-                # Add configured agents first
-                for name, cmd in self.agents:
-                    yield AgentSelectItem(name, cmd)
-                # Add empty shell option
-                yield AgentSelectItem("Empty Shell", "")
-                # Add cancel option
-                item = AgentSelectItem("[Cancel]", "__CANCEL__")
-                item.add_class("cancel-item")
-                yield item
-    
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Handle agent selection."""
-        if isinstance(event.item, AgentSelectItem):
-            if event.item.command == "__CANCEL__":
-                self.dismiss(None)
-            else:
-                self.dismiss((event.item.agent_name, event.item.command))
-    
-    def action_cancel(self) -> None:
-        """Cancel the modal."""
-        self.dismiss(None)
-    
-    def action_cursor_down(self) -> None:
-        """Move cursor down in list."""
-        list_view = self.query_one("#agent-select-list", ListView)
-        list_view.action_cursor_down()
-    
-    def action_cursor_up(self) -> None:
-        """Move cursor up in list."""
-        list_view = self.query_one("#agent-select-list", ListView)
-        list_view.action_cursor_up()
-
-
-class ShortcutsModal(ModalScreen[None]):
-    """Modal showing keyboard shortcuts."""
-    
-    @property
-    def CSS(self) -> str:
-        c = get_colors()
-        return f"""
-    ShortcutsModal {{
-        align: center middle;
-        background: rgba(0, 0, 0, 0.6);
-    }}
-    
-    #shortcuts-container {{
-        width: 90%;
-        height: auto;
-        max-height: 28;
-        background: {c.surface};
-        border: thick {c.primary};
-        padding: 2 3;
-    }}
-    
-    #shortcuts-title {{
-        text-style: bold;
-        text-align: center;
-        padding-bottom: 1;
-        color: {c.primary};
-    }}
-    
-    .shortcut-section {{
-        padding-top: 1;
-        color: {c.text_muted};
-        text-style: bold;
-    }}
-    
-    .shortcut-row {{
-        color: {c.text};
-    }}
-    
-    .shortcut-key {{
-        color: {c.primary};
-        text-style: bold;
-    }}
-    
-    #close-hint {{
-        padding-top: 1;
-        text-align: center;
-        color: {c.text_dim};
-    }}
-    """
-    
-    BINDINGS = [
-        ("escape", "close", "Close"),
-        ("question_mark", "close", "Close"),
-    ]
-    
-    # Human-readable descriptions for actions
-    ACTION_DESCRIPTIONS = {
-        "new_agent": "New agent",
-        "rename_agent": "Rename",
-        "import_agent": "Import pane",
-        "close_agent": "Close agent",
-        "focus_agent_pane": "Focus pane",
-        "refresh": "Refresh",
-        "show_shortcuts": "Help",
-        "cursor_down": "Move down",
-        "cursor_up": "Move up",
-    }
-    
-    def compose(self) -> ComposeResult:
-        with Vertical(id="shortcuts-container"):
-            yield Static("⌨ Keyboard Shortcuts", id="shortcuts-title")
-            
-            # Get bindings from Sidebar class
-            from . import main as main_module
-            bindings = getattr(main_module.Sidebar, 'BINDINGS', [])
-            
-            # Group bindings by category
-            nav_keys = []
-            agent_keys = []
-            for binding in bindings:
-                if len(binding) < 3:
-                    continue  # Skip hidden bindings without description
-                key, action, desc = binding[0], binding[1], binding[2]
-                # Clean up key names
-                display_key = key.replace("question_mark", "?")
-                # Get action name (strip parameters)
-                action_name = action.split("(")[0]
-                # Use our descriptions or fallback to provided desc
-                display_desc = self.ACTION_DESCRIPTIONS.get(action_name, desc)
-                
-                # Categorize
-                if action_name in ("cursor_down", "cursor_up", "focus_agent_pane"):
-                    nav_keys.append((display_key, display_desc))
-                elif action_name.startswith("switch_agent"):
-                    continue  # Handle separately
-                else:
-                    agent_keys.append((display_key, display_desc))
-            
-            yield Static("Navigation", classes="shortcut-section")
-            yield Static("j/k      Move up/down", classes="shortcut-row")
-            yield Static("Tab      Focus pane", classes="shortcut-row")
-            yield Static("Enter    Select agent", classes="shortcut-row")
-            
-            yield Static("Agents", classes="shortcut-section")
-            for key, desc in agent_keys:
-                yield Static(f"{key:<8} {desc}", classes="shortcut-row")
-            yield Static("1-5      Switch to #", classes="shortcut-row")
-            
-            yield Static("", classes="shortcut-section")
-            yield Static("Esc/?    Close help", classes="shortcut-row")
-    
-    def action_close(self) -> None:
-        """Close the modal."""
-        self.dismiss(None)
-
-
-class RenameModal(ModalScreen[str | None]):
-    """Modal for renaming an agent pane."""
-    
-    @property
-    def CSS(self) -> str:
-        c = get_colors()
-        return f"""
-    RenameModal {{
-        align: center middle;
-        background: rgba(0, 0, 0, 0.6);
-    }}
-    
-    #rename-container {{
-        width: 90%;
-        height: auto;
-        background: {c.surface};
-        border: thick {c.primary};
-        padding: 1 2;
-    }}
-    
-    #rename-title {{
-        text-style: bold;
-        text-align: center;
-        padding-bottom: 1;
-        color: {c.primary};
-    }}
-    
-    #rename-input {{
-        margin: 1 0;
-    }}
-    
-    #rename-hint {{
-        text-align: center;
-        color: {c.text_muted};
-    }}
-    """
-    
-    BINDINGS = [
-        ("escape", "cancel", "Cancel"),
-    ]
-    
-    def __init__(self, current_name: str) -> None:
-        super().__init__()
-        self.current_name = current_name
-    
-    def compose(self) -> ComposeResult:
-        from textual.widgets import Input
-        with Vertical(id="rename-container"):
-            yield Static("✏ Rename Agent", id="rename-title")
-            yield Input(value=self.current_name, placeholder="Enter new name", id="rename-input")
-            yield Static("Enter to confirm, Escape to cancel", id="rename-hint")
-    
-    def on_input_submitted(self, event) -> None:
-        """Handle input submission."""
-        new_name = event.value.strip()
-        if new_name:
-            self.dismiss(new_name)
-        else:
-            self.dismiss(None)
-    
-    def action_cancel(self) -> None:
-        """Cancel the rename."""
-        self.dismiss(None)
-
-
-class QuitConfirmModal(ModalScreen[bool]):
-    """Modal to confirm quitting impromptu."""
-    
-    @property
-    def CSS(self) -> str:
-        c = get_colors()
-        return f"""
-    QuitConfirmModal {{
-        align: center middle;
-        background: rgba(0, 0, 0, 0.6);
-    }}
-    
-    #quit-container {{
-        width: 90%;
-        height: auto;
-        background: {c.surface};
-        border: thick {c.warning};
-        padding: 1 2;
-    }}
-    
-    #quit-title {{
-        text-style: bold;
-        text-align: center;
-        padding-bottom: 1;
-        color: {c.warning};
-    }}
-    
-    #quit-message {{
-        text-align: center;
-        padding: 1 0;
-        color: {c.text};
-    }}
-    
-    #button-row {{
-        height: auto;
-        width: 100%;
-        align: center middle;
-        padding-top: 1;
-    }}
-    
-    .quit-button {{
-        width: 40%;
-        min-width: 6;
-        margin: 0 1;
-    }}
-    
-    #btn-no {{
-        background: {c.primary};
-    }}
-    
-    #btn-yes {{
-        background: {c.surface};
-        border: solid {c.warning};
-    }}
-    
-    .quit-button:focus {{
-        background: {c.selection_bg};
-    }}
-    """
-    
-    BINDINGS = [
-        ("y", "confirm", "Yes"),
-        ("n", "cancel", "No"),
-        ("escape", "cancel", "Cancel"),
-        ("left", "focus_previous", "Left"),
-        ("right", "focus_next", "Right"),
-        ("h", "focus_previous", "Left"),
-        ("l", "focus_next", "Right"),
-    ]
-    
-    def compose(self) -> ComposeResult:
-        from textual.widgets import Button
-        from textual.containers import Horizontal
-        with Vertical(id="quit-container"):
-            yield Static("⚠ Quit Impromptu?", id="quit-title")
-            yield Static("This will kill all agent panes.", id="quit-message")
-            with Horizontal(id="button-row"):
-                yield Button("Yes", id="btn-yes", classes="quit-button")
-                yield Button("No", id="btn-no", classes="quit-button")
-    
-    def on_mount(self) -> None:
-        """Focus No button by default."""
-        self.query_one("#btn-no").focus()
-    
-    def on_button_pressed(self, event) -> None:
-        """Handle button press."""
-        if event.button.id == "btn-yes":
-            self.dismiss(True)
-        else:
-            self.dismiss(False)
-    
-    def action_confirm(self) -> None:
-        """Confirm quit."""
-        self.dismiss(True)
-    
-    def action_cancel(self) -> None:
-        """Cancel quit."""
-        self.dismiss(False)
-    
-    def action_focus_previous(self) -> None:
-        """Focus previous button."""
-        self.focus_previous()
-    
-    def action_focus_next(self) -> None:
-        """Focus next button."""
-        self.focus_next()
-
-
-class NotificationArea(Static):
-    """Custom notification area that shows history of messages."""
-    
-    MAX_MESSAGES = 3
-    CHECK_INTERVAL = 0.5  # Check for expired messages every 0.5s
-    
-    def __init__(self) -> None:
-        super().__init__("", id="notification-area")
-        self._messages: dict[int, tuple[str, float]] = {}  # {id: (message, expire_time)}
-        self._next_id = 0
-        self._check_timer = None
-    
-    def on_mount(self) -> None:
-        """Start the expiration check timer."""
-        self._check_timer = self.set_interval(self.CHECK_INTERVAL, self._check_expired)
-    
-    def show_message(self, message: str, duration: float = 5.0) -> None:
-        """Show a notification message that expires after duration."""
-        import time
-        msg_id = self._next_id
-        self._next_id += 1
-        expire_time = time.time() + duration
-        self._messages[msg_id] = (message, expire_time)
-        
-        # Keep only the last MAX_MESSAGES
-        while len(self._messages) > self.MAX_MESSAGES:
-            oldest_id = min(self._messages.keys())
-            del self._messages[oldest_id]
-        
-        # Display immediately
-        self._update_display()
-    
-    def _check_expired(self) -> None:
-        """Check for and remove expired messages."""
-        import time
-        now = time.time()
-        expired = [msg_id for msg_id, (_, expire_time) in self._messages.items() if now >= expire_time]
-        if expired:
-            for msg_id in expired:
-                del self._messages[msg_id]
-            self._update_display()
-    
-    def _update_display(self) -> None:
-        """Update the displayed text independently of other UI updates."""
-        if self._messages:
-            # Show messages newest at top (highest ID first)
-            sorted_msgs = sorted(self._messages.items(), reverse=True)
-            text = "\n".join(msg for _, (msg, _) in sorted_msgs)
-            self.update(text)
-            self.add_class("notification")
-        else:
-            self.update("")
-            self.remove_class("notification")
-        # Force refresh to ensure independent redraw
-        self.refresh()
-
-
-class AgentItem(ListItem):
-    """A list item representing an agent with message preview."""
-
-    # Status icons: green=idle, yellow=busy, red=blocked
-    STATUS_ICONS = {
-        "idle": "🟢",      # Green - ready for input
-        "busy": "🟡",      # Yellow - agent is processing
-        "blocked": "🔴",   # Red - needs user approval to continue
-    }
-
-    def __init__(self, name: str, index: int, status: str = "idle", 
-                 active: bool = False, messages: list[str] | None = None) -> None:
-        super().__init__()
-        self.agent_name = name
-        self.agent_index = index
-        self.status = status
-        self.is_active = active
-        self.messages = messages or []
-        # Add class for styling
-        if active:
-            self.add_class("active-agent")
-
-    def compose(self) -> ComposeResult:
-        icon = self.STATUS_ICONS.get(self.status, "⚪")
-        # Header line: [number] icon name
-        yield Label(f"[{self.agent_index + 1}] {icon} {self.agent_name}", classes="agent-header")
-        # Always create 2 message label slots (even if empty) so they can be updated later
-        for i in range(2):
-            msg = self.messages[i] if i < len(self.messages) else ""
-            yield Label(msg, classes="agent-message")
 
 
 class Sidebar(App):
@@ -897,7 +416,7 @@ class Sidebar(App):
             if is_first:
                 self._store.set_active_agent(0)
             else:
-                new_index = len(self._store.state.agents) - 1
+                new_index = len(self._tracked_panes) - 1
                 self._store.set_active_agent(new_index)
                 new_pane.select()
             
@@ -986,18 +505,20 @@ class Sidebar(App):
         self._render_agent_list()
     
     def _render_agent_list(self) -> None:
-        """Render agent list from state store."""
+        """Render agent list from _tracked_panes (single source of truth)."""
         list_view = self.query_one("#agent-list", ListView)
-        state = self._store.state
-        agents = state.agents
         
         # Get current items count
         current_count = len(list_view)
-        target_count = len(agents)
+        target_count = len(self._tracked_panes)
+        
+        # Get active pane for highlighting
+        visible_pane = self._get_visible_pane()
+        active_pane_id = visible_pane.pane_id if visible_pane else None
         
         # Update existing items in place, add new ones, or remove extras
-        for i, agent_state in enumerate(agents):
-            is_active = (i == state.active_index)
+        for i, pane in enumerate(self._tracked_panes):
+            is_active = (pane.pane_id == active_pane_id)
             
             if i < current_count:
                 # Update existing item's labels
@@ -1007,12 +528,11 @@ class Sidebar(App):
                         # Update header label
                         labels = list(existing_item.query(Label))
                         if labels:
-                            # Use actual status (green=idle, yellow=busy, red=blocked)
-                            icon = AgentItem.STATUS_ICONS.get(agent_state.status, "🟢")
-                            labels[0].update(f"[{i + 1}] {icon} {agent_state.name}")
+                            icon = AgentItem.STATUS_ICONS.get(pane.status, "🟢")
+                            labels[0].update(f"[{i + 1}] {icon} {pane.name}")
                         
                         # Update message labels
-                        for j, msg in enumerate(agent_state.messages[:2]):
+                        for j, msg in enumerate(pane.messages[:2] if pane.messages else []):
                             if j + 1 < len(labels):
                                 labels[j + 1].update(msg)
                     except Exception:
@@ -1024,20 +544,13 @@ class Sidebar(App):
                         existing_item.remove_class("active-agent")
             else:
                 # Add new item with messages
-                item = AgentItem(agent_state.name, i, status=agent_state.status, 
-                                active=is_active, messages=agent_state.messages)
+                item = AgentItem(pane.name, i, status=pane.status, 
+                                active=is_active, messages=pane.messages or [])
                 list_view.append(item)
         
         # Remove extra items if we have fewer agents now
         while len(list_view) > target_count:
             list_view.pop()
-        
-        # Set cursor position to active agent's current position in sorted list
-        if active_pane_id:
-            for i, agent in enumerate(sorted_agents):
-                if agent.pane_id == active_pane_id:
-                    list_view.index = i
-                    break
     
     def _render_notifications(self) -> None:
         """Render notifications from state store."""
@@ -1247,33 +760,51 @@ class Sidebar(App):
         list_view = self.query_one("#agent-list", ListView)
         current_index = list_view.index
         
+        # Fall back to current visible pane if none selected in list
+        if current_index is None or current_index >= len(self._tracked_panes):
+            current_pane = self._get_visible_pane()
+            if current_pane:
+                current_index = next((i for i, p in enumerate(self._tracked_panes) if p.pane_id == current_pane.pane_id), None)
+        
         if current_index is None or current_index >= len(self._tracked_panes):
             self._show_notification("No agent selected")
             return
         
         current_pane = self._tracked_panes[current_index]
+        self._rename_index = current_index  # Store for callback
         self.push_screen(RenameModal(current_pane.name), self._on_rename_complete)
     
     def _on_rename_complete(self, new_name: str | None) -> None:
         """Handle rename modal result."""
-        if new_name is None:
-            return
-        
-        list_view = self.query_one("#agent-list", ListView)
-        current_index = list_view.index
-        
-        if current_index is None or current_index >= len(self._tracked_panes):
-            return
-        
-        # Update the pane name
-        self._tracked_panes[current_index].name = new_name
-        # Update UI immediately, then pause status polling
-        self._refresh_list()
-        self._pause_polling(2.0)
-        self._show_notification(f"Renamed to: {new_name}")
-        
-        # Focus the agent pane
-        tmux.run_command("select-pane -t 1")
+        try:
+            if new_name is None:
+                return
+            
+            current_index = getattr(self, '_rename_index', None)
+            if current_index is None or current_index >= len(self._tracked_panes):
+                self._show_notification("Agent no longer exists")
+                return
+            
+            # Update the pane name (single source of truth)
+            pane = self._tracked_panes[current_index]
+            pane.name = new_name
+            
+            # Also update the tmux pane title
+            tmux.run_command(f'select-pane -t {pane.pane_id} -T "{new_name}"')
+            
+            # Update UI immediately, then pause status polling
+            self._refresh_list()
+            self._pause_polling(2.0)
+            self._show_notification(f"Renamed to: {new_name}")
+            
+            # Focus the agent pane
+            tmux.run_command("select-pane -t 1")
+        except Exception as e:
+            with open("/tmp/impromptu_error.log", "a") as f:
+                import traceback
+                f.write(f"Rename error: {e}\n")
+                traceback.print_exc(file=f)
+            raise
     
     def action_cursor_down(self) -> None:
         """Move cursor down in agent list."""
@@ -1296,6 +827,10 @@ class Sidebar(App):
 def main():
     """Main entry point - orchestrates tmux and runs sidebar."""
     import argparse
+    import traceback
+    
+    # Set up error logging to file
+    error_log = "/tmp/impromptu_error.log"
     
     parser = argparse.ArgumentParser(description="Impromptu - Multi-agent TUI manager")
     parser.add_argument("session", nargs="?", default=None,

@@ -31,9 +31,16 @@ class TrackedPane:
     
     The pane_id (like %1, %2) is stable and doesn't change.
     The window changes when we break/join panes.
+    This is the single source of truth for agent UI state.
     """
     pane_id: str  # Stable ID like %1, %2
     name: str  # Display name
+    status: str = "idle"  # "idle", "busy", "blocked"
+    messages: list = None  # Recent message previews
+    
+    def __post_init__(self):
+        if self.messages is None:
+            self.messages = []
     
     def get_window(self) -> Optional[str]:
         """Get the window index this pane is currently in."""
@@ -438,10 +445,14 @@ def split_window_with_command(
         
         full_cmd = "; ".join(parts)
         
-        # Use interactive shell (-i) so shell functions like hgd work
-        import os as _os
-        user_shell = _os.environ.get("SHELL", "/bin/bash")
-        cmd.extend([user_shell, "-i", "-c", full_cmd])
+        if command:
+            # Use interactive shell (-i -c) for commands so shell functions work
+            import os as _os
+            user_shell = _os.environ.get("SHELL", "/bin/bash")
+            cmd.extend([user_shell, "-i", "-c", full_cmd])
+        else:
+            # No command - just pass env setup, shell will stay open
+            cmd.append(full_cmd + "; exec $SHELL")
     
     with open("/tmp/impromptu_debug.log", "a") as _f:
         _f.write(f"CMD: {cmd}\n")
