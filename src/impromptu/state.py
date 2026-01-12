@@ -32,14 +32,6 @@ class Notification:
     id: int
 
 
-# Status priority for sorting (lower = higher priority in list)
-STATUS_PRIORITY = {
-    "blocked": 0,  # Needs user input - top
-    "idle": 1,     # Ready for input - middle
-    "active": 1,   # Same as idle (just highlighted)
-    "busy": 2,     # Processing - bottom
-    "thinking": 2, # Same as busy
-}
 
 
 @dataclass
@@ -49,7 +41,7 @@ class UIState:
     active_index: int = 0
     notifications: list[Notification] = field(default_factory=list)
     current_agent_name: str = ""
-    auto_reorder: bool = False  # Sort agents by status priority
+
     
     def copy(self) -> "UIState":
         """Create a deep copy of state."""
@@ -57,8 +49,7 @@ class UIState:
             agents=[a.copy() for a in self.agents],
             active_index=self.active_index,
             notifications=list(self.notifications),
-            current_agent_name=self.current_agent_name,
-            auto_reorder=self.auto_reorder
+            current_agent_name=self.current_agent_name
         )
 
 
@@ -91,30 +82,7 @@ class StateStore:
         """Get current state (read-only view)."""
         return self._state
     
-    def get_sorted_agents_with_active(self) -> tuple[list[AgentUIState], str | None]:
-        """Get agents sorted by status priority with active pane_id.
-        
-        Returns:
-            (sorted_agents, active_pane_id) - agents sorted if auto_reorder enabled,
-            and the pane_id of the active agent
-        """
-        state = self._state
-        
-        # Get active pane_id before any reordering
-        active_pane_id = None
-        if 0 <= state.active_index < len(state.agents):
-            active_pane_id = state.agents[state.active_index].pane_id
-        
-        if not state.auto_reorder:
-            return state.agents, active_pane_id
-        
-        # Sort by status priority (blocked first, then idle, then busy)
-        sorted_agents = sorted(
-            state.agents,
-            key=lambda a: STATUS_PRIORITY.get(a.status, 1)
-        )
-        return sorted_agents, active_pane_id
-    
+
     def subscribe(self, callback: StateCallback) -> Callable[[], None]:
         """Subscribe to state changes.
         

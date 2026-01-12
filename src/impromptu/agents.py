@@ -17,31 +17,47 @@ class SessionWatcher:
     Uses hook-based state provider for accurate status detection,
     with fallback to message-based detection if hooks aren't enabled.
     """
-    
     def __init__(self, session_path: Path, agent_id: Optional[str] = None, on_change: Optional[Callable[[], None]] = None):
         self.session_path = session_path
         self.agent_id = agent_id
         self.on_change = on_change
         self._last_size = 0
         self._last_mtime = 0.0
+        self._last_logs_mtime = 0.0  # Track logs.json separately for instant user messages
         self._cached_last_messages: list[str] = []
         self._cached_status: str = "idle"
         self._state_provider = get_gemini_state_provider()
     
     def has_changed(self) -> bool:
-        """Check if file has changed since last check."""
-        if not self.session_path.exists():
-            return False
+        """Check if file has changed since last check.
         
-        try:
-            stat = self.session_path.stat()
-            if stat.st_size != self._last_size or stat.st_mtime != self._last_mtime:
-                self._last_size = stat.st_size
-                self._last_mtime = stat.st_mtime
-                return True
-        except OSError:
-            pass
-        return False
+        Checks both session JSON and logs.json for changes.
+        """
+        changed = False
+        
+        # Check session file
+        if self.session_path.exists():
+            try:
+                stat = self.session_path.stat()
+                if stat.st_size != self._last_size or stat.st_mtime != self._last_mtime:
+                    self._last_size = stat.st_size
+                    self._last_mtime = stat.st_mtime
+                    changed = True
+            except OSError:
+                pass
+        
+        # Also check logs.json for instant user message updates
+        logs_path = self.session_path.parent.parent / "logs.json"
+        if logs_path.exists():
+            try:
+                logs_mtime = logs_path.stat().st_mtime
+                if logs_mtime != self._last_logs_mtime:
+                    self._last_logs_mtime = logs_mtime
+                    changed = True
+            except OSError:
+                pass
+        
+        return changed
     
     def check_and_update(self) -> bool:
         """Check for changes and update cached data if changed.
@@ -60,44 +76,63 @@ class SessionWatcher:
         return True
     
     def _update_from_file(self) -> None:
-        """Parse file and update cached last messages and status.
+        """Parse files and update cached last messages.
         
-        Uses tail-read optimization: reads only last 4KB to find recent messages.
+        Reads user messages from logs.json (fast, small file) 
+        and gemini messages from session tail (4KB).
         """
+        import re
+        messages = []
+        
         try:
-            # Read only the last 4KB of the file for speed
+            # 1. Get user messages from logs.json (small, updates instantly)
+            logs_path = self.session_path.parent.parent / "logs.json"
+            if logs_path.exists():
+                # Read last 2KB of logs.json
+                file_size = logs_path.stat().st_size
+                read_size = min(file_size, 2048)
+                with open(logs_path, 'rb') as f:
+                    if file_size > read_size:
+                        f.seek(file_size - read_size)
+                    logs_tail = f.read().decode('utf-8', errors='ignore')
+                
+                # Get session ID from our session path (e.g., session-...-5c1b4d66.json)
+                session_id_prefix = self.session_path.stem.split('-')[-1]  # e.g., "5c1b4d66"
+                
+                # Find user messages for this session
+                pattern = rf'"sessionId":\s*"{session_id_prefix}[^"]*"[^}}]*?"message":\s*"((?:[^"\\]|\\.)*)"'
+                for m in re.findall(pattern, logs_tail):
+                    content = m.replace('\\n', ' ').replace('\\t', ' ')[:40]
+                    if content.strip():
+                        messages.append(("user", content.strip()))
+            
+            # 2. Get gemini messages from session tail (4KB)
             file_size = self.session_path.stat().st_size
             read_size = min(file_size, 4096)
-            
             with open(self.session_path, 'rb') as f:
                 if file_size > read_size:
                     f.seek(file_size - read_size)
                 tail_data = f.read().decode('utf-8', errors='ignore')
             
-            # Find message patterns in tail - look for "content" and "type" fields
-            import re
-            
-            # Pattern to find message blocks with content and type
-            # Messages have format: {"type": "user|gemini", "content": "..."}
-            pattern = r'"type"\s*:\s*"(user|gemini)"[^}]*?"content"\s*:\s*"([^"]*)"'
-            matches = re.findall(pattern, tail_data, re.DOTALL)
-            
-            # Get last 2 messages (matches are in order found in tail)
-            self._cached_last_messages = []
-            for msg_type, content in reversed(matches[-4:]):  # Get last 4, reverse
-                if len(self._cached_last_messages) >= 2:
-                    break
-                if content and content.strip():
-                    # Unescape JSON strings
-                    content = content.replace('\\n', ' ').replace('\\t', ' ')
-                    if len(content) > 40:
-                        content = content[:37] + "..."
-                    content = content.strip()
-                    prefix = "▸" if msg_type == "user" else "◂"
-                    self._cached_last_messages.append(f"{prefix} {content}")
-                    
+            # Pattern for gemini messages only
+            pattern = r'"type":\s*"gemini",\s*"content":\s*"((?:[^"\\]|\\.)*)"'
+            for content in re.findall(pattern, tail_data):
+                content = content.replace('\\n', ' ').replace('\\t', ' ')[:40]
+                if content.strip():
+                    messages.append(("gemini", content.strip()))
+        
         except Exception:
             pass
+        
+        # Build last 2 messages (prefer recent)
+        self._cached_last_messages = []
+        for msg_type, content in reversed(messages[-4:]):
+            if len(self._cached_last_messages) >= 2:
+                break
+            if len(content) > 40:
+                content = content[:37] + "..."
+            prefix = "▸" if msg_type == "user" else "◂"
+            self._cached_last_messages.append(f"{prefix} {content}")
     
     @property
     def last_messages(self) -> list[str]:

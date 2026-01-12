@@ -204,7 +204,6 @@ class ShortcutsModal(ModalScreen[None]):
             yield Static("n        New agent", classes="shortcut-row")
             yield Static("r        Rename agent", classes="shortcut-row")
             yield Static("i        Import pane", classes="shortcut-row")
-            yield Static("s        Toggle sort", classes="shortcut-row")
             yield Static("1-5      Switch to #", classes="shortcut-row")
             
             yield Static("", classes="shortcut-section")
@@ -478,7 +477,6 @@ class Sidebar(App):
         ("n", "new_agent", "New"),
         ("r", "rename_agent", "Rename"),
         ("i", "import_agent", "Import"),
-        ("s", "toggle_reorder", "Sort"),
         ("question_mark", "show_shortcuts", "Help"),
         ("1", "switch_agent(0)", "1"),
         ("2", "switch_agent(1)", "2"),
@@ -605,15 +603,17 @@ class Sidebar(App):
         if session_dir.exists():
             self._file_watcher.watch_session_dir(session_dir)
         
-        # Fast polling for session matching and message updates (0.1s)
-        # File watcher supplements this with instant updates on changes
-        self.set_interval(0.1, self._poll_status)
+        # 50ms fast poll for instant message updates (file is tiny, read is <1ms)
+        self.set_interval(0.05, lambda: self._update_all_agents(force=True))
+        # Slow poll for session matching
+        self.set_interval(1.0, self._match_sessions)
         self.set_interval(0.5, self._expire_notifications)
     
     def _on_file_change(self, path: Path) -> None:
         """Called when a session or state file changes - triggers immediate update."""
         # Use call_from_thread to safely update UI from watchdog thread
-        self.call_from_thread(self._poll_status)
+        # force=True skips mtime check since we know file just changed
+        self.call_from_thread(lambda: self._update_all_agents(force=True))
     
     def _create_agent(self, name: str, is_first: bool = False) -> Optional[GeminiAgent]:
         """Create a new agent with proper session tracking.
@@ -686,13 +686,11 @@ class Sidebar(App):
         
         return None
     
-    def _poll_status(self) -> None:
-        """Poll pane status and update state store."""
-        # Skip polling if paused (during pane operations)
+    def _match_sessions(self) -> None:
+        """Match agents to sessions (slow poll, 1s)."""
         if self._polling_paused:
             return
         
-        # Match agents to sessions (try hook-based, fallback to PID-based)
         for pane in self._tracked_panes:
             agent = self._agents_by_pane.get(pane.pane_id)
             if not agent or not isinstance(agent, GeminiAgent):
@@ -702,7 +700,7 @@ class Sidebar(App):
             if agent.session_path:
                 continue
             
-            # Hook-based matching ONLY - fallbacks cause race conditions during rapid creation
+            # Hook-based matching ONLY
             session_file = agent.find_session_by_hook()
             
             if session_file:
@@ -712,12 +710,23 @@ class Sidebar(App):
                 # Watch the session directory for instant updates
                 if hasattr(self, '_file_watcher') and session_file.parent:
                     self._file_watcher.watch_session_dir(session_file.parent)
+                # Trigger immediate UI update
+                self._update_all_agents()
+    
+    def _update_all_agents(self, force: bool = False) -> None:
+        """Update status/messages for all agents.
         
-        # Update status/messages for agents that have watchers
+        Args:
+            force: If True, skip has_changed check (used by file watcher)
+        """
         for pane in self._tracked_panes:
             agent = self._agents_by_pane.get(pane.pane_id)
             if agent and hasattr(agent, '_watcher') and agent._watcher:
-                agent._watcher.check_and_update()
+                if force:
+                    # File watcher triggered - force read without mtime check
+                    agent._watcher._update_from_file()
+                else:
+                    agent._watcher.check_and_update()
                 
                 status = agent._watcher.status
                 messages = agent._watcher.last_messages
@@ -761,18 +770,15 @@ class Sidebar(App):
         """Render agent list from state store."""
         list_view = self.query_one("#agent-list", ListView)
         state = self._store.state
-        
-        # Get sorted agents if auto_reorder is enabled
-        sorted_agents, active_pane_id = self._store.get_sorted_agents_with_active()
+        agents = state.agents
         
         # Get current items count
         current_count = len(list_view)
-        target_count = len(sorted_agents)
+        target_count = len(agents)
         
         # Update existing items in place, add new ones, or remove extras
-        for i, agent_state in enumerate(sorted_agents):
-            # Check if this is the active agent by pane_id
-            is_active = (agent_state.pane_id == active_pane_id)
+        for i, agent_state in enumerate(agents):
+            is_active = (i == state.active_index)
             
             if i < current_count:
                 # Update existing item's labels
@@ -882,36 +888,16 @@ class Sidebar(App):
             self._show_notification(f"Failed: {e}")
 
     def action_switch_agent(self, index: int) -> None:
-        """Switch to a different agent using break/join-pane.
-        
-        Index corresponds to display order (which may be sorted if auto_reorder is on).
-        """
-        state = self._store.state
-        sorted_agents, active_pane_id = self._store.get_sorted_agents_with_active()
-        
-        if index >= len(sorted_agents):
+        """Switch to a different agent using break/join-pane."""
+        if index >= len(self._tracked_panes):
             self._show_notification(f"No agent {index + 1}")
             return
         
-        # Get the pane_id of the target agent in display order
-        target_agent_state = sorted_agents[index]
-        target_pane_id = target_agent_state.pane_id
-        
-        # Find the target pane by pane_id
-        target_pane = None
-        target_index = -1
-        for i, pane in enumerate(self._tracked_panes):
-            if pane.pane_id == target_pane_id:
-                target_pane = pane
-                target_index = i
-                break
-        
-        if not target_pane:
-            self._show_notification(f"Agent pane not found")
-            return
+        state = self._store.state
+        target_pane = self._tracked_panes[index]
 
         # Already on this agent?
-        if target_pane_id == active_pane_id:
+        if index == state.active_index:
             target_pane.select()
             self._show_notification(f"Already on {target_pane.name}")
             return
@@ -928,7 +914,7 @@ class Sidebar(App):
             # Check if target is already in main window (nothing to do)
             if target_pane.is_in_main_window():
                 target_pane.select()
-                self._store.set_active_agent(target_index)
+                self._store.set_active_agent(index)
                 self._show_notification(f"Focused {target_pane.name}")
                 return
             
@@ -952,7 +938,7 @@ class Sidebar(App):
                 )
             
             # Update active via store (triggers UI update)
-            self._store.set_active_agent(target_index)
+            self._store.set_active_agent(index)
             self._pause_polling(3.0)
             self._show_notification(f"Switched to {target_pane.name}")
         except Exception as e:
@@ -981,13 +967,6 @@ class Sidebar(App):
     def action_show_shortcuts(self) -> None:
         """Show the keyboard shortcuts modal."""
         self.push_screen(ShortcutsModal())
-    
-    def action_toggle_reorder(self) -> None:
-        """Toggle auto-reorder of agents by status priority."""
-        current = self._store.state.auto_reorder
-        self._store.update(auto_reorder=not current)
-        status = "ON" if not current else "OFF"
-        self._show_notification(f"Auto-reorder: {status}")
     
     def action_rename_agent(self) -> None:
         """Show modal to rename the currently highlighted agent."""
