@@ -543,8 +543,9 @@ class Sidebar(App):
     
     def _debug_panes(self) -> str:
         """Return debug info about tracked panes."""
-        lines = [f"Sidebar: {self._sidebar_agent.pane_id if self._sidebar_pane else 'None'}"]
+        lines = [f"Sidebar: {self._sidebar_pane.pane_id if self._sidebar_pane else 'None'}"]
         for i, agent in enumerate(self._store.state.agents):
+            pane = tmux.TrackedPane(pane_id=agent.pane_id, name=agent.name)
             window = pane.get_window()
             lines.append(f"  [{i+1}] {agent.name}: {agent.pane_id} (window {window})")
         return "\n".join(lines)
@@ -699,9 +700,11 @@ class Sidebar(App):
         try:
             # Get the currently active pane (from store)
             current_agent = self._store.state.agents[state.active_index] if 0 <= state.active_index < len(self._store.state.agents) else None
+            current_pane = tmux.TrackedPane(pane_id=current_agent.pane_id, name=current_agent.name) if current_agent else None
+            target_pane = tmux.TrackedPane(pane_id=target_agent.pane_id, name=target_agent.name)
             
             # Check if target pane still exists
-            if not tmux.pane_exists(target_agent.pane_id):
+            if not target_pane.pane_exists():
                 self._show_notification(f"Pane {target_agent.name} no longer exists")
                 return
             
@@ -719,14 +722,14 @@ class Sidebar(App):
                 # Batch: break current, join target, resize, focus
                 tmux.run_command(
                     f'break-pane -d -s {current_pane.pane_id} \\; '
-                    f'join-pane -h -s {target_agent.pane_id} -t {self._sidebar_agent.pane_id} \\; '
+                    f'join-pane -h -s {target_agent.pane_id} -t {self._sidebar_pane.pane_id} \\; '
                     f'resize-pane -t 0 -x 20% \\; '
                     f'select-pane -t 1'
                 )
             elif self._sidebar_pane:
                 # Just join target (nothing visible to break)
                 tmux.run_command(
-                    f'join-pane -h -s {target_agent.pane_id} -t {self._sidebar_agent.pane_id} \\; '
+                    f'join-pane -h -s {target_agent.pane_id} -t {self._sidebar_pane.pane_id} \\; '
                     f'resize-pane -t 0 -x 20% \\; '
                     f'select-pane -t 1'
                 )
