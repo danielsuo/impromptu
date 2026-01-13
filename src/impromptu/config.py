@@ -66,6 +66,8 @@ class Config:
     # Behavior
     show_header: bool = True
     show_footer: bool = True
+    confirm_on_quit: bool = True  # Show confirmation modal before quitting
+    confirm_on_close: bool = False  # Show confirmation modal before closing agent
     
     # Notifications
     notifications_enabled: bool = True
@@ -80,6 +82,9 @@ class Config:
     
     # Keybindings
     keybindings: dict[str, str] = field(default_factory=dict)
+    
+    # Runtime options
+    debug_mode: bool = False
     
     def get_agent_names(self) -> list[str]:
         """Get list of configured agent names."""
@@ -130,6 +135,8 @@ def load_config() -> Config:
         dark_mode=appearance.get("dark_mode", True),
         show_header=behavior.get("show_header", True),
         show_footer=behavior.get("show_footer", True),
+        confirm_on_quit=behavior.get("confirm_on_quit", True),
+        confirm_on_close=behavior.get("confirm_on_close", True),
         notifications_enabled=notifications.get("enabled", True),
         notifications_sound=notifications.get("sound", False),
         notifications_duration=notifications.get("duration_seconds", 5),

@@ -24,6 +24,7 @@ from .ui import (
     ShortcutsModal,
     RenameModal,
     QuitConfirmModal,
+    CloseAgentModal,
     AgentItem,
     NotificationArea,
     SetupCommandModal,
@@ -164,9 +165,11 @@ class Sidebar(App):
 
     def __init__(self, config: Config):
         super().__init__()
+        with open("/tmp/impromptu_error.log", "a") as f:
+            f.write("Sidebar.__init__ started\n")
         self.config = config
         self._agents: list[tuple[str, str]] = []  # (name, command) pairs for modal
-        self._tracked_panes: list[tmux.TrackedPane] = []  # Tracked agent panes
+
         self._sidebar_pane: tmux.TrackedPane | None = None  # Sidebar pane (always visible)
         self._poll_timer: Timer | None = None
         self._agents_by_pane: dict[str, BaseAgent] = {}  # pane_id -> agent instance
@@ -176,6 +179,8 @@ class Sidebar(App):
         # Centralized state store
         self._store = StateStore()
         self._store.subscribe(self._on_state_change)
+        with open("/tmp/impromptu_error.log", "a") as f:
+            f.write("Sidebar.__init__ completed\n")
     
     def _get_agent_command(self, name: str) -> str:
         """Get the command for an agent name from config."""
@@ -235,18 +240,25 @@ class Sidebar(App):
 
     def on_mount(self) -> None:
         """Initialize agent list and start polling."""
+        def log(msg):
+            with open("/tmp/impromptu_error.log", "a") as f:
+                f.write(f"on_mount: {msg}\n")
+        log("started")
         # Install Gemini hooks globally if ~/.gemini exists
         install_hooks()
+        log("hooks installed")
         
         self.dark = self.config.dark_mode
 
         # Build agent list from config (list of dicts)
         self._agents = [(a.get("name", "unnamed"), self._build_command(a)) for a in self.config.agents]
+        log(f"agents built: {self._agents}")
         
         # Get sidebar pane ID
         sidebar_id = tmux.get_pane_id("0")
         if sidebar_id:
             self._sidebar_pane = tmux.TrackedPane(pane_id=sidebar_id, name="sidebar")
+        log(f"sidebar pane: {sidebar_id}")
         
         # Clear stale session mappings from previous runs
         # This prevents off-by-one matching with old agent UUIDs
@@ -254,25 +266,31 @@ class Sidebar(App):
         for f in [Path("/tmp/impromptu_session_mapping.txt"), Path("/tmp/impromptu_agent_state.txt")]:
             if f.exists():
                 f.unlink()
+        log("cleared stale mappings")
         
         # Kill any existing pane 1 (from startup script) - we'll create our own
         existing_pane = tmux.get_pane_id("1")
         if existing_pane:
             tmux.run_command(f'kill-pane -t {existing_pane}')
+        log(f"killed existing pane: {existing_pane}")
         
         # Create initial agent
         if self._agents:
             first_name, first_cmd = self._agents[0]
         else:
             first_name, first_cmd = "gemini", "bash"
+        log(f"creating agent: {first_name}")
         self._create_agent(first_name, first_cmd, is_first=True)
+        log("agent created")
         
         # Register tmux keybindings
         self._register_keybindings()
+        log("keybindings registered")
         
         # Start file watcher for instant updates on file changes
         self._file_watcher = get_session_watcher(self._on_file_change)
         self._file_watcher.start()
+        log("file watcher started")
         
         # Watch for state files in /tmp (already done in watcher init)
         # Also watch session chats directory AND project dir for logs.json
@@ -288,12 +306,14 @@ class Sidebar(App):
         # Watch chats dir for session JSON updates
         if session_dir.exists():
             self._file_watcher.watch_session_dir(session_dir)
+        log("session dirs watched")
         
         # 50ms fast poll for instant message updates (file is tiny, read is <1ms)
         self.set_interval(0.05, lambda: self._update_all_agents(force=True))
         # Slow poll for session matching
         self.set_interval(1.0, self._match_sessions)
         self.set_interval(0.5, self._expire_notifications)
+        log("intervals set - on_mount complete")
     
     def _on_file_change(self, path: Path) -> None:
         """Called when a session or state file changes - triggers immediate update."""
@@ -318,6 +338,9 @@ class Sidebar(App):
         
         # Alt+r sends 'r' key to sidebar (rename agent)
         tmux.run_command('bind-key -n M-r "select-pane -t 0 ; send-keys r"')
+        
+        # Alt+w sends 'w' key to sidebar (close agent)
+        tmux.run_command('bind-key -n M-w "select-pane -t 0 ; send-keys w"')
         
         # Alt+d detaches from tmux session (global)
         tmux.run_command('bind-key -n M-d detach-client')
@@ -348,52 +371,75 @@ class Sidebar(App):
             self._show_notification(f"Error: Command not found: {command}")
             return None
 
+        # Determine command execution strategy
+        use_send_keys = self.config.debug_mode
+        
+        if use_send_keys:
+            # In debug mode, create shell pane and send command via keys
+            # This keeps pane open if command fails
+            pane_cmd = ""  # Empty means default shell
+            pane_env = None  # Don't pass env to split-window, we'll export via send-keys
+            # Construct keys command with env export (no exec)
+            env_export = f"export IMPROMPTU_AGENT_ID={agent.uuid}"
+            if command:
+                keys_cmd = f"{env_export} && {setup_cmd} && {command}" if setup_cmd else f"{env_export} && {command}"
+            else:
+                keys_cmd = f"{env_export} && {setup_cmd}" if setup_cmd else env_export
+        else:
+            # Standard mode: pass command to split-window with exec
+            if command:
+                full_cmd = f"{setup_cmd} && exec {command}" if setup_cmd else command
+            else:
+                full_cmd = f"{setup_cmd}; exec $SHELL" if setup_cmd else ""
+            pane_cmd = full_cmd
+            keys_cmd = None
+            pane_env = {"IMPROMPTU_AGENT_ID": agent.uuid}
+
         # Note: agent.created_at is set automatically for session matching
         
-        # Create the pane and run command via shell to inherit environment
-        if is_first:
-            # Build command with proper escaping via list-based subprocess
-            if command:
-                # Use exec so interactive commands replace the shell
-                full_cmd = f"{setup_cmd} && exec {command}" if setup_cmd else command
+        # Create the pane
+        try:
+            if is_first:
+                tmux.split_window_with_command(
+                    direction="-h",
+                    target="0",
+                    command=pane_cmd,
+                    env=pane_env,
+                )
+                tmux.run_command('resize-pane -t 0 -x 20%')
             else:
-                full_cmd = f"{setup_cmd}; exec $SHELL" if setup_cmd else ""
-            
-            tmux.split_window_with_command(
-                direction="-h",
-                target="0",
-                command=full_cmd,
-                env={"IMPROMPTU_AGENT_ID": agent.uuid},
-
-            )
-            tmux.run_command('resize-pane -t 0 -x 20%')
-        else:
-            visible_pane = self._get_visible_pane()
-            if not visible_pane:
-                return None
-            # Build command with proper escaping via list-based subprocess
-            if command:
-                # Use exec so interactive commands replace the shell
-                full_cmd = f"{setup_cmd} && exec {command}" if setup_cmd else command
-            else:
-                full_cmd = f"{setup_cmd}; exec $SHELL" if setup_cmd else ""
-            
-            # Create new pane by splitting from current visible one
-            tmux.split_window_with_command(
-                direction="-v",
-                target=visible_pane.pane_id,
-                command=full_cmd,
-                env={"IMPROMPTU_AGENT_ID": agent.uuid}
-            )
-            # Break the OLD visible pane to a hidden window, leaving new pane as main
-            tmux.run_command(f'break-pane -d -s {visible_pane.pane_id}')
-            tmux.run_command('resize-pane -t 0 -x 20%')
-            tmux.run_command('select-pane -t 1')
+                visible_pane = self._get_visible_pane()
+                if not visible_pane:
+                    return None
+                
+                # Create new pane by splitting from current visible one
+                tmux.split_window_with_command(
+                    direction="-v",
+                    target=visible_pane.pane_id,
+                    command=pane_cmd,
+                    env=pane_env
+                )
+                # Break the OLD visible pane to a hidden window, leaving new pane as main
+                tmux.run_command(f'break-pane -d -s {visible_pane.pane_id}')
+                tmux.run_command('resize-pane -t 0 -x 20%')
+                tmux.run_command('select-pane -t 1')
+        except Exception as e:
+            import traceback
+            with open("/tmp/impromptu_error.log", "a") as f:
+                f.write(f"_create_agent pane creation error: {e}\n{traceback.format_exc()}\n")
+            self._show_notification(f"Failed to create pane: {e}")
+            return None
         
         # Get the new pane's ID (it's always index 1 in window 0 now)
         new_pane_id = tmux.get_pane_id("1")
         
         if new_pane_id:
+            # Send command keys if in debug mode
+            if use_send_keys and keys_cmd:
+                # Small delay to ensure shell is ready
+                time.sleep(0.1)
+                tmux.send_keys(new_pane_id, keys_cmd)
+
             agent.pane_id = new_pane_id
             
             new_pane = tmux.TrackedPane(pane_id=new_pane_id, name=name)
@@ -401,10 +447,7 @@ class Sidebar(App):
             # Capture pane PID for session matching
             agent.pane_pid = new_pane.get_pane_pid()
             
-            if is_first:
-                self._tracked_panes = [new_pane]
-            else:
-                self._tracked_panes.append(new_pane)
+
             
             self._agents_by_pane[new_pane_id] = agent
             
@@ -416,7 +459,7 @@ class Sidebar(App):
             if is_first:
                 self._store.set_active_agent(0)
             else:
-                new_index = len(self._tracked_panes) - 1
+                new_index = len(self._store.state.agents) - 1
                 self._store.set_active_agent(new_index)
                 new_pane.select()
             
@@ -429,8 +472,8 @@ class Sidebar(App):
         if self._polling_paused:
             return
         
-        for pane in self._tracked_panes:
-            agent = self._agents_by_pane.get(pane.pane_id)
+        for agent in self._store.state.agents:
+            agent = self._agents_by_pane.get(agent.pane_id)
             if not agent or not isinstance(agent, GeminiAgent):
                 continue
             
@@ -457,47 +500,53 @@ class Sidebar(App):
         Args:
             force: If True, skip has_changed check (used by file watcher)
         """
-        for pane in self._tracked_panes:
-            agent = self._agents_by_pane.get(pane.pane_id)
-            if agent and hasattr(agent, '_watcher') and agent._watcher:
-                if force:
-                    # File watcher triggered - force read without mtime check
-                    agent._watcher._update_from_file()
-                else:
-                    agent._watcher.check_and_update()
-                
-                status = agent._watcher.status
-                messages = agent._watcher.last_messages
-                
-                self._store.update_agent(
-                    pane.pane_id,
-                    status=status,
-                    messages=messages
-                )
+        try:
+            for agent in self._store.state.agents:
+                agent = self._agents_by_pane.get(agent.pane_id)
+                if agent and hasattr(agent, '_watcher') and agent._watcher:
+                    if force:
+                        # File watcher triggered - force read without mtime check
+                        agent._watcher._update_from_file()
+                    else:
+                        agent._watcher.check_and_update()
+                    
+                    status = agent._watcher.status
+                    messages = agent._watcher.last_messages
+                    
+                    self._store.update_agent(
+                        agent.pane_id,
+                        status=status,
+                        messages=messages
+                    )
+        except Exception as e:
+            import traceback
+            with open("/tmp/impromptu_error.log", "a") as f:
+                f.write(f"_update_all_agents error: {e}\n{traceback.format_exc()}\n")
     
     def _expire_notifications(self) -> None:
         """Check and expire old notifications."""
-        self._store.expire_notifications()
+        self._store.clean_notifications()
 
     def _get_visible_pane(self) -> tmux.TrackedPane | None:
         """Get the agent pane that's currently in the main window (visible).
         
         Excludes the sidebar pane.
         """
-        for pane in self._tracked_panes:
+        for agent in self._store.state.agents:
             # Skip if this is the sidebar
-            if self._sidebar_pane and pane.pane_id == self._sidebar_pane.pane_id:
+            if self._sidebar_pane and agent.pane_id == self._sidebar_pane.pane_id:
                 continue
-            if pane.is_in_main_window():
-                return pane
+            tp = tmux.TrackedPane(pane_id=agent.pane_id, name=agent.name)
+            if tp.is_in_main_window():
+                return tp
         return None
     
     def _debug_panes(self) -> str:
         """Return debug info about tracked panes."""
-        lines = [f"Sidebar: {self._sidebar_pane.pane_id if self._sidebar_pane else 'None'}"]
-        for i, pane in enumerate(self._tracked_panes):
+        lines = [f"Sidebar: {self._sidebar_agent.pane_id if self._sidebar_pane else 'None'}"]
+        for i, agent in enumerate(self._store.state.agents):
             window = pane.get_window()
-            lines.append(f"  [{i+1}] {pane.name}: {pane.pane_id} (window {window})")
+            lines.append(f"  [{i+1}] {agent.name}: {agent.pane_id} (window {window})")
         return "\n".join(lines)
 
     def _refresh_list(self) -> None:
@@ -505,52 +554,57 @@ class Sidebar(App):
         self._render_agent_list()
     
     def _render_agent_list(self) -> None:
-        """Render agent list from _tracked_panes (single source of truth)."""
-        list_view = self.query_one("#agent-list", ListView)
-        
-        # Get current items count
-        current_count = len(list_view)
-        target_count = len(self._tracked_panes)
-        
-        # Get active pane for highlighting
-        visible_pane = self._get_visible_pane()
-        active_pane_id = visible_pane.pane_id if visible_pane else None
-        
-        # Update existing items in place, add new ones, or remove extras
-        for i, pane in enumerate(self._tracked_panes):
-            is_active = (pane.pane_id == active_pane_id)
+        """Render agent list from _store (single source of truth)."""
+        try:
+            list_view = self.query_one("#agent-list", ListView)
             
-            if i < current_count:
-                # Update existing item's labels
-                existing_item = list(list_view.children)[i]
-                if existing_item:
-                    try:
-                        # Update header label
-                        labels = list(existing_item.query(Label))
-                        if labels:
-                            icon = AgentItem.STATUS_ICONS.get(pane.status, "🟢")
-                            labels[0].update(f"[{i + 1}] {icon} {pane.name}")
-                        
-                        # Update message labels
-                        for j, msg in enumerate(pane.messages[:2] if pane.messages else []):
-                            if j + 1 < len(labels):
-                                labels[j + 1].update(msg)
-                    except Exception:
-                        pass
-                    # Update active class (for highlighting)
-                    if is_active:
-                        existing_item.add_class("active-agent")
-                    else:
-                        existing_item.remove_class("active-agent")
-            else:
-                # Add new item with messages
-                item = AgentItem(pane.name, i, status=pane.status, 
-                                active=is_active, messages=pane.messages or [])
-                list_view.append(item)
-        
-        # Remove extra items if we have fewer agents now
-        while len(list_view) > target_count:
-            list_view.pop()
+            # Get current items count
+            current_count = len(list_view)
+            target_count = len(self._store.state.agents)
+            
+            # Get active pane for highlighting
+            visible_pane = self._get_visible_pane()
+            active_pane_id = visible_pane.pane_id if visible_pane else None
+            
+            # Update existing items in place, add new ones, or remove extras
+            for i, agent in enumerate(self._store.state.agents):
+                is_active = (agent.pane_id == active_pane_id)
+                
+                if i < current_count:
+                    # Update existing item's labels
+                    existing_item = list(list_view.children)[i]
+                    if existing_item:
+                        try:
+                            # Update header label
+                            labels = list(existing_item.query(Label))
+                            if labels:
+                                icon = AgentItem.STATUS_ICONS.get(agent.status, "🟢")
+                                labels[0].update(f"[{i + 1}] {icon} {agent.name}")
+                            
+                            # Update message labels
+                            for j, msg in enumerate(agent.messages[:2] if agent.messages else []):
+                                if j + 1 < len(labels):
+                                    labels[j + 1].update(msg)
+                        except Exception:
+                            pass
+                        # Update active class (for highlighting)
+                        if is_active:
+                            existing_item.add_class("active-agent")
+                        else:
+                            existing_item.remove_class("active-agent")
+                else:
+                    # Add new item with messages
+                    item = AgentItem(agent.name, i, status=agent.status, 
+                                    active=is_active, messages=agent.messages or [])
+                    list_view.append(item)
+            
+            # Remove extra items if we have fewer agents now
+            while len(list_view) > target_count:
+                list_view.pop()
+        except Exception as e:
+            import traceback
+            with open("/tmp/impromptu_error.log", "a") as f:
+                f.write(f"_render_agent_list error: {e}\n{traceback.format_exc()}\n")
     
     def _render_notifications(self) -> None:
         """Render notifications from state store."""
@@ -612,9 +666,9 @@ class Sidebar(App):
         try:
             # Determine display name for new agent
             if agent_name == "Empty Shell":
-                display_name = f"shell-{len(self._tracked_panes) + 1}"
+                display_name = f"shell-{len(self._store.state.agents) + 1}"
             else:
-                count = sum(1 for p in self._tracked_panes if p.name.startswith(agent_name))
+                count = sum(1 for a in self._store.state.agents if a.name.startswith(agent_name))
                 display_name = f"{agent_name}-{count + 1}" if count > 0 else agent_name
             
             agent = self._create_agent(display_name, agent_command, is_first=False, setup_cmd=setup_cmd)
@@ -629,33 +683,33 @@ class Sidebar(App):
 
     def action_switch_agent(self, index: int) -> None:
         """Switch to a different agent using break/join-pane."""
-        if index >= len(self._tracked_panes):
+        if index >= len(self._store.state.agents):
             self._show_notification(f"No agent {index + 1}")
             return
         
         state = self._store.state
-        target_pane = self._tracked_panes[index]
+        target_agent = self._store.state.agents[index]
 
         # Already on this agent?
         if index == state.active_index:
-            target_pane.select()
-            self._show_notification(f"Already on {target_pane.name}")
+            tmux.run_command(f"select-pane -t {target_agent.pane_id}")
+            self._show_notification(f"Already on {target_agent.name}")
             return
 
         try:
             # Get the currently active pane (from store)
-            current_pane = self._tracked_panes[state.active_index] if 0 <= state.active_index < len(self._tracked_panes) else None
+            current_agent = self._store.state.agents[state.active_index] if 0 <= state.active_index < len(self._store.state.agents) else None
             
             # Check if target pane still exists
-            if not target_pane.pane_exists():
-                self._show_notification(f"Pane {target_pane.name} no longer exists")
+            if not tmux.pane_exists(target_agent.pane_id):
+                self._show_notification(f"Pane {target_agent.name} no longer exists")
                 return
             
             # Check if target is already in main window (nothing to do)
             if target_pane.is_in_main_window():
-                target_pane.select()
+                tmux.run_command(f"select-pane -t {target_agent.pane_id}")
                 self._store.set_active_agent(index)
-                self._show_notification(f"Focused {target_pane.name}")
+                self._show_notification(f"Focused {target_agent.name}")
                 return
             
             # Only break current if it's in main window (visible)
@@ -665,14 +719,14 @@ class Sidebar(App):
                 # Batch: break current, join target, resize, focus
                 tmux.run_command(
                     f'break-pane -d -s {current_pane.pane_id} \\; '
-                    f'join-pane -h -s {target_pane.pane_id} -t {self._sidebar_pane.pane_id} \\; '
+                    f'join-pane -h -s {target_agent.pane_id} -t {self._sidebar_agent.pane_id} \\; '
                     f'resize-pane -t 0 -x 20% \\; '
                     f'select-pane -t 1'
                 )
             elif self._sidebar_pane:
                 # Just join target (nothing visible to break)
                 tmux.run_command(
-                    f'join-pane -h -s {target_pane.pane_id} -t {self._sidebar_pane.pane_id} \\; '
+                    f'join-pane -h -s {target_agent.pane_id} -t {self._sidebar_agent.pane_id} \\; '
                     f'resize-pane -t 0 -x 20% \\; '
                     f'select-pane -t 1'
                 )
@@ -680,7 +734,7 @@ class Sidebar(App):
             # Update active via store (triggers UI update)
             self._store.set_active_agent(index)
             self._pause_polling(3.0)
-            self._show_notification(f"Switched to {target_pane.name}")
+            self._show_notification(f"Switched to {target_agent.name}")
         except Exception as e:
             self._show_notification(f"Failed: {e}")
 
@@ -688,9 +742,9 @@ class Sidebar(App):
         """Switch focus to the visible agent pane."""
         try:
             state = self._store.state
-            if 0 <= state.active_index < len(self._tracked_panes):
-                active_pane = self._tracked_panes[state.active_index]
-                active_pane.select()
+            if 0 <= state.active_index < len(self._store.state.agents):
+                agent = self._store.state.agents[state.active_index]
+                tmux.run_command(f"select-pane -t {agent.pane_id}")
         except Exception:
             pass
 
@@ -705,6 +759,8 @@ class Sidebar(App):
     
     def action_quit_app(self) -> None:
         """Show quit confirmation modal."""
+        with open("/tmp/impromptu_error.log", "a") as f:
+            f.write("action_quit_app called!\n")
         self.push_screen(QuitConfirmModal(), self._on_quit_confirm)
     
     def _on_quit_confirm(self, confirmed: bool) -> None:
@@ -718,61 +774,65 @@ class Sidebar(App):
         self.push_screen(ShortcutsModal())
     
     def action_close_agent(self) -> None:
-        """Close the currently highlighted agent pane."""
+        """Close the currently selected or visible agent pane."""
+        with open("/tmp/impromptu_error.log", "a") as f:
+            f.write("action_close_agent called!\n")
         list_view = self.query_one("#agent-list", ListView)
         current_index = list_view.index
         
-        if current_index is None or current_index >= len(self._tracked_panes):
+        # Fall back to visible pane
+        if current_index is None or current_index >= len(self._store.state.agents):
+            visible_pane = self._get_visible_pane()
+            if visible_pane:
+                current_index = next((i for i, p in enumerate(self._store.state.agents) 
+                                     if p.pane_id == visible_pane.pane_id), None)
+        
+        if current_index is None or current_index >= len(self._store.state.agents):
             self._show_notification("No agent selected")
             return
         
-        if len(self._tracked_panes) <= 1:
-            self._show_notification("Cannot close last agent")
+        # If only one agent, show quit confirmation
+        if len(self._store.state.agents) <= 1:
+            self.action_quit_app()
             return
         
-        pane = self._tracked_panes[current_index]
-        pane_id = pane.pane_id
-        pane_name = pane.name
+        agent = self._store.state.agents[current_index]
+        pane_id = agent.pane_id
+        pane_name = agent.name
         
+        # Close immediately without confirmation
         try:
-            # Kill the tmux pane
             tmux.run_command(f'kill-pane -t {pane_id}')
-            
-            # Remove from tracking
-            del self._tracked_panes[current_index]
+            self._store.remove_agent(pane_id)
             if pane_id in self._agents_by_pane:
                 del self._agents_by_pane[pane_id]
             
-            # Update store
-            self._store.remove_agent(pane_id)
-            
-            # Select the previous or first remaining agent
-            new_index = min(current_index, len(self._tracked_panes) - 1)
+            new_index = min(current_index, len(self._store.state.agents) - 1)
             self._store.set_active_agent(new_index)
-            
+            self._register_tmux_keybindings()
             self._refresh_list()
             self._show_notification(f"Closed {pane_name}")
         except Exception as e:
-            self._show_notification(f"Failed to close: {e}")
-    
+            self._show_notification(f"Failed: {e}")
+
     def action_rename_agent(self) -> None:
         """Show modal to rename the currently highlighted agent."""
         list_view = self.query_one("#agent-list", ListView)
         current_index = list_view.index
         
         # Fall back to current visible pane if none selected in list
-        if current_index is None or current_index >= len(self._tracked_panes):
+        if current_index is None or current_index >= len(self._store.state.agents):
             current_pane = self._get_visible_pane()
             if current_pane:
-                current_index = next((i for i, p in enumerate(self._tracked_panes) if p.pane_id == current_pane.pane_id), None)
+                current_index = next((i for i, p in enumerate(self._store.state.agents) if p.pane_id == current_pane.pane_id), None)
         
-        if current_index is None or current_index >= len(self._tracked_panes):
+        if current_index is None or current_index >= len(self._store.state.agents):
             self._show_notification("No agent selected")
             return
         
-        current_pane = self._tracked_panes[current_index]
+        current_agent = self._store.state.agents[current_index]
         self._rename_index = current_index  # Store for callback
-        self.push_screen(RenameModal(current_pane.name), self._on_rename_complete)
+        self.push_screen(RenameModal(current_agent.name), self._on_rename_complete)
     
     def _on_rename_complete(self, new_name: str | None) -> None:
         """Handle rename modal result."""
@@ -781,16 +841,16 @@ class Sidebar(App):
                 return
             
             current_index = getattr(self, '_rename_index', None)
-            if current_index is None or current_index >= len(self._tracked_panes):
+            if current_index is None or current_index >= len(self._store.state.agents):
                 self._show_notification("Agent no longer exists")
                 return
             
             # Update the pane name (single source of truth)
-            pane = self._tracked_panes[current_index]
-            pane.name = new_name
+            agent = self._store.state.agents[current_index]
+            agent.name = new_name
             
             # Also update the tmux pane title
-            tmux.run_command(f'select-pane -t {pane.pane_id} -T "{new_name}"')
+            tmux.run_command(f'select-pane -t {agent.pane_id} -T "{new_name}"')
             
             # Update UI immediately, then pause status polling
             self._refresh_list()
@@ -835,11 +895,14 @@ def main():
     parser = argparse.ArgumentParser(description="Impromptu - Multi-agent TUI manager")
     parser.add_argument("session", nargs="?", default=None,
                         help="Session name to create or attach to (default: impromptu)")
+    parser.add_argument("--debug", action="store_true", 
+                        help="Debug mode: use send-keys for commands to keep panes open on error")
     parser.add_argument("--inside-tmux", action="store_true", 
                         help=argparse.SUPPRESS)  # Internal flag
     args = parser.parse_args()
     
     config = load_config()
+    config.debug_mode = args.debug
 
     # Check if tmux is available
     if not tmux.is_tmux_available():
@@ -859,9 +922,12 @@ def main():
             return
 
         # Create new session running this script
+        inner_cmd = [sys.executable, "-m", "impromptu.main", "--inside-tmux"]
+        if args.debug:
+            inner_cmd.append("--debug")
         subprocess.run([
             "tmux", "new-session", "-s", session_name, "-d",
-            sys.executable, "-m", "impromptu.main", "--inside-tmux"
+            *inner_cmd
         ], check=True)
         
         # Small delay to let session initialize
@@ -875,8 +941,8 @@ def main():
     # We're inside tmux - set up layout and run sidebar
     if "--inside-tmux" in sys.argv:
         try:
-            # Get first agent command
-            agents = config.agents.agents
+            # Get first agent command (unused currently, but kept for future use)
+            agents = config.agents  # config.agents is already a list
             first_agent_cmd = "bash"
 
             # Small delay to let window settle at full size
@@ -901,8 +967,31 @@ def main():
             print(f"Layout setup warning: {e}", file=sys.stderr)
 
     # Run the sidebar app
-    app = Sidebar(config)
-    app.run()
+    try:
+        app = Sidebar(config)
+        with open("/tmp/impromptu_error.log", "a") as f:
+            import os
+            import shutil
+            f.write(f"Starting app.run()\n")
+            f.write(f"  TERM={os.environ.get('TERM', 'unset')}\n")
+            f.write(f"  isatty(stdin)={sys.stdin.isatty()}\n")
+            f.write(f"  isatty(stdout)={sys.stdout.isatty()}\n")
+            f.write(f"  shell={os.environ.get('SHELL', 'unset')}\n")
+            size = shutil.get_terminal_size()
+            f.write(f"  terminal_size={size.columns}x{size.lines}\n")
+        app.run()
+        with open("/tmp/impromptu_error.log", "a") as f:
+            f.write("app.run() completed normally\n")
+    except Exception as e:
+        import traceback
+        error_msg = traceback.format_exc()
+        with open("/tmp/impromptu_error.log", "a") as f:
+            f.write(f"\n{'='*60}\n{error_msg}\n")
+        print(f"Error: {e}", file=sys.stderr)
+        print(f"Full traceback saved to /tmp/impromptu_error.log", file=sys.stderr)
+        if config.debug_mode:
+            print("\nDebug mode: Press Enter to exit...", file=sys.stderr)
+            input()
 
 
 if __name__ == "__main__":

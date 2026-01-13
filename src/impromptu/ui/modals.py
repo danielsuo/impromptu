@@ -366,6 +366,8 @@ class QuitConfirmModal(ModalScreen[bool]):
         self.query_one("#btn-no").focus()
     
     def on_button_pressed(self, event) -> None:
+        with open("/tmp/impromptu_error.log", "a") as f:
+            f.write(f"Button pressed: {event.button.id}\n")
         if event.button.id == "btn-yes":
             self.dismiss(True)
         else:
@@ -436,3 +438,109 @@ class SetupCommandModal(ModalScreen[str]):
     
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self.dismiss(event.value)
+
+
+class CloseAgentModal(ModalScreen[bool]):
+    """Modal to confirm closing an agent pane."""
+    
+    def __init__(self, agent_name: str) -> None:
+        super().__init__()
+        self.agent_name = agent_name
+    
+    @property
+    def CSS(self) -> str:
+        c = get_colors()
+        return f"""
+    CloseAgentModal {{
+        align: center middle;
+        background: rgba(0, 0, 0, 0.6);
+    }}
+    
+    #close-container {{
+        width: 90%;
+        height: auto;
+        background: {c.surface};
+        border: thick {c.warning};
+        padding: 1 2;
+    }}
+    
+    #close-title {{
+        text-style: bold;
+        text-align: center;
+        padding-bottom: 1;
+        color: {c.warning};
+    }}
+    
+    #close-message {{
+        text-align: center;
+        padding: 1 0;
+        color: {c.text};
+    }}
+    
+    #button-row {{
+        height: auto;
+        width: 100%;
+        align: center middle;
+        padding-top: 1;
+    }}
+    
+    .close-button {{
+        width: 40%;
+        min-width: 6;
+        margin: 0 1;
+    }}
+    
+    #btn-no {{
+        background: {c.primary};
+    }}
+    
+    #btn-yes {{
+        background: {c.surface};
+        border: solid {c.warning};
+    }}
+    
+    .close-button:focus {{
+        background: {c.selection_bg};
+    }}
+    """
+    
+    BINDINGS = [
+        ("y", "confirm", "Yes"),
+        ("n", "cancel", "No"),
+        ("escape", "cancel", "Cancel"),
+        ("left", "focus_previous", "Left"),
+        ("right", "focus_next", "Right"),
+        ("h", "focus_previous", "Left"),
+        ("l", "focus_next", "Right"),
+    ]
+    
+    def compose(self) -> ComposeResult:
+        with Vertical(id="close-container"):
+            yield Static(f"⚠ Close {self.agent_name}?", id="close-title")
+            yield Static("This will terminate the agent process.", id="close-message")
+            with Horizontal(id="button-row"):
+                yield Button("Yes", id="btn-yes", classes="close-button")
+                yield Button("No", id="btn-no", classes="close-button")
+    
+    def on_mount(self) -> None:
+        self.query_one("#btn-no").focus()
+    
+    def on_button_pressed(self, event) -> None:
+        with open("/tmp/impromptu_error.log", "a") as f:
+            f.write(f"Button pressed: {event.button.id}\n")
+        if event.button.id == "btn-yes":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+    
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+    
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+    
+    def action_focus_previous(self) -> None:
+        self.focus_previous()
+    
+    def action_focus_next(self) -> None:
+        self.focus_next()

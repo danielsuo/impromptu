@@ -7,6 +7,7 @@ from .modals import (
     RenameModal,
     QuitConfirmModal,
     SetupCommandModal,
+    CloseAgentModal,
 )
 from .agent_list import AgentItem
 from .notification import NotificationArea
@@ -17,6 +18,7 @@ __all__ = [
     "ShortcutsModal",
     "RenameModal", 
     "QuitConfirmModal",
+    "CloseAgentModal",
     "AgentItem",
     "NotificationArea",
     "SetupCommandModal",
