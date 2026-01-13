@@ -146,31 +146,36 @@ class Sidebar(App):
         """React to state changes by updating UI.
         
         This is called whenever any part of the state changes.
+        Uses call_later to avoid deadlocks when called from state updates.
         """
-        # Update agent list if agents changed
-        agents_differ = old_state.agents != new_state.agents
-        index_differ = old_state.active_index != new_state.active_index
-        with open("/tmp/impromptu_timing.log", "a") as f:
-            if new_state.agents and old_state.agents:
-                old_msgs = old_state.agents[0].messages
-                new_msgs = new_state.agents[0].messages
-                f.write(f"[{time.time():.3f}] COMPARE agents_differ={agents_differ} same_list={id(old_msgs)==id(new_msgs)} old={old_msgs} new={new_msgs}\n")
-        if agents_differ or index_differ:
+        def do_update():
+            # Update agent list if agents changed
+            agents_differ = old_state.agents != new_state.agents
+            index_differ = old_state.active_index != new_state.active_index
             with open("/tmp/impromptu_timing.log", "a") as f:
-                f.write(f"[{time.time():.3f}] _on_state_change RENDER triggered\n")
-            self._render_agent_list()
+                if new_state.agents and old_state.agents:
+                    old_msgs = old_state.agents[0].messages
+                    new_msgs = new_state.agents[0].messages
+                    f.write(f"[{time.time():.3f}] COMPARE agents_differ={agents_differ} same_list={id(old_msgs)==id(new_msgs)} old={old_msgs} new={new_msgs}\n")
+            if agents_differ or index_differ:
+                with open("/tmp/impromptu_timing.log", "a") as f:
+                    f.write(f"[{time.time():.3f}] _on_state_change RENDER triggered\n")
+                self._render_agent_list()
+            
+            # Update current agent label if changed
+            if old_state.current_agent_name != new_state.current_agent_name:
+                try:
+                    current_label = self.query_one("#current-agent", Static)
+                    current_label.update(f"▶ {new_state.current_agent_name}")
+                except Exception:
+                    pass
+            
+            # Update notifications if changed
+            if old_state.notifications != new_state.notifications:
+                self._render_notifications()
         
-        # Update current agent label if changed
-        if old_state.current_agent_name != new_state.current_agent_name:
-            try:
-                current_label = self.query_one("#current-agent", Static)
-                current_label.update(f"▶ {new_state.current_agent_name}")
-            except Exception:
-                pass
-        
-        # Update notifications if changed
-        if old_state.notifications != new_state.notifications:
-            self._render_notifications()
+        # Defer to avoid deadlock when called from state update mid-operation
+        self.call_later(do_update)
     
     def _on_hook_message(self, message: dict, agent_id: str, pane_id: str) -> None:
         """Handle hook messages received via socket.
@@ -564,16 +569,15 @@ class Sidebar(App):
         self._store.clean_notifications()
 
     def _get_visible_pane_id(self) -> str | None:
-        """Get the pane_id of the agent pane currently in the main window (visible).
+        """Get the pane_id of the currently active agent.
         
-        Excludes the sidebar pane.
+        Uses store's active_index instead of querying tmux to avoid 
+        blocking calls on potentially stale pane IDs.
         """
-        for agent in self._store.state.agents:
-            # Skip if this is the sidebar
-            if self._sidebar_pane_id and agent.pane_id == self._sidebar_pane_id:
-                continue
-            if tmux.is_pane_in_main_window(agent.pane_id):
-                return agent.pane_id
+        agents = self._store.state.agents
+        active_idx = self._store.state.active_index
+        if 0 <= active_idx < len(agents):
+            return agents[active_idx].pane_id
         return None
     
     def _debug_panes(self) -> str:
@@ -591,11 +595,17 @@ class Sidebar(App):
     def _render_agent_list(self) -> None:
         """Render agent list from _store (single source of truth)."""
         try:
+            with open("/tmp/impromptu_error.log", "a") as f:
+                f.write(f"RENDER: start\n")
+            
             list_view = self.query_one("#agent-list", ListView)
             
             # Get current items count
             current_count = len(list_view)
             target_count = len(self._store.state.agents)
+            
+            with open("/tmp/impromptu_error.log", "a") as f:
+                f.write(f"RENDER: current={current_count} target={target_count}\n")
             
             # Get active pane for highlighting
             active_pane_id = self._get_visible_pane_id()
@@ -648,9 +658,18 @@ class Sidebar(App):
                                     num_lines=agent.num_lines)
                     list_view.append(item)
             
+            with open("/tmp/impromptu_error.log", "a") as f:
+                f.write(f"RENDER: about to remove extras (have {len(list_view)}, want {target_count})\n")
+            
             # Remove extra items if we have fewer agents now
-            while len(list_view) > target_count:
+            items_to_remove = len(list_view) - target_count
+            for _ in range(items_to_remove):
+                with open("/tmp/impromptu_error.log", "a") as f:
+                    f.write(f"RENDER: popping 1 of {items_to_remove}\n")
                 list_view.pop()
+            
+            with open("/tmp/impromptu_error.log", "a") as f:
+                f.write(f"RENDER: complete\n")
         except Exception as e:
             with open("/tmp/impromptu_error.log", "a") as f:
                 f.write(f"_render_agent_list error: {e}\n{traceback.format_exc()}\n")
@@ -906,18 +925,27 @@ class Sidebar(App):
                 self._store.set_active_agent(new_index)
                 with open("/tmp/impromptu_error.log", "a") as f:
                     f.write(f"Step 4: active agent set\n")
-                # Just select the next pane instead of complex switch
-                tmux.run_command("select-pane -t 1")
+                
+                # Join the remaining agent's pane back into view
+                remaining_agent = self._store.state.agents[new_index]
+                remaining_pane = remaining_agent.pane_id
                 with open("/tmp/impromptu_error.log", "a") as f:
-                    f.write(f"Step 5: select-pane done\n")
+                    f.write(f"Step 5: joining pane {remaining_pane} into main window\n")
+                
+                # Join the pane horizontally next to sidebar
+                if self._sidebar_pane_id:
+                    tmux.run_command(f'join-pane -h -s {remaining_pane} -t {self._sidebar_pane_id}')
+                    tmux.run_command('resize-pane -t 0 -x 20%')
+                    tmux.run_command(f'select-pane -t {remaining_pane}')
+                
+                with open("/tmp/impromptu_error.log", "a") as f:
+                    f.write(f"Step 6: pane joined\n")
             
             with open("/tmp/impromptu_error.log", "a") as f:
-                f.write(f"Step 6: about to refresh list\n")
+                f.write(f"Step 7: skipping explicit render (state change will handle)\n")
             
-            self._refresh_list()
-            
-            with open("/tmp/impromptu_error.log", "a") as f:
-                f.write(f"Step 7: list refreshed\n")
+            # Re-register keybindings since agent indices changed
+            self.call_later(self._register_keybindings)
             
             self._show_notification(f"Closed {pane_name}")
             

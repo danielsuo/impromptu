@@ -19,24 +19,32 @@ SESSION_NAME = "impromptu"
 
 def get_pane_window(pane_id: str) -> Optional[str]:
     """Get the window index a pane is currently in."""
-    result = subprocess.run(
-        ["tmux", "display-message", "-p", "-t", pane_id, "#{window_index}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        return result.stdout.strip()
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane_id, "#{window_index}"],
+            capture_output=True,
+            text=True,
+            timeout=1,  # Prevent indefinite blocking
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        pass
     return None
 
 
 def pane_exists(pane_id: str) -> bool:
     """Check if a pane still exists in tmux."""
-    result = subprocess.run(
-        ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}"],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def is_pane_in_main_window(pane_id: str) -> bool:
@@ -47,24 +55,32 @@ def is_pane_in_main_window(pane_id: str) -> bool:
 
 def focus_pane(pane_id: str) -> None:
     """Focus a pane by its ID."""
-    subprocess.run(
-        ["tmux", "select-pane", "-t", pane_id],
-        capture_output=True
-    )
+    try:
+        subprocess.run(
+            ["tmux", "select-pane", "-t", pane_id],
+            capture_output=True,
+            timeout=1,
+        )
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def get_pane_pid(pane_id: str) -> int | None:
     """Get the PID of the shell process in a pane."""
-    result = subprocess.run(
-        ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_pid}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0 and result.stdout.strip():
-        try:
-            return int(result.stdout.strip())
-        except ValueError:
-            return None
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_pid}"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                return int(result.stdout.strip())
+            except ValueError:
+                return None
+    except subprocess.TimeoutExpired:
+        pass
     return None
 
 
