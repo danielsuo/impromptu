@@ -1,9 +1,8 @@
 """Centralized UI state management with reactive pub/sub pattern."""
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional, List, Any
+from typing import Callable
 import time
-import copy
 
 
 @dataclass
@@ -12,7 +11,9 @@ class AgentUIState:
     pane_id: str
     name: str
     status: str = "idle"  # "idle", "busy", "thinking", "ready"
-    messages: list[str] = field(default_factory=list)  # Recent message previews
+    messages: list[tuple[str, str]] = field(default_factory=list)  # (role, content) tuples
+    pinned_message: tuple[str, str] | None = None  # User prompt pinned to first line
+    num_lines: int = 2  # Number of message lines to display
     
     def copy(self) -> "AgentUIState":
         """Create a shallow copy."""
@@ -20,7 +21,9 @@ class AgentUIState:
             pane_id=self.pane_id,
             name=self.name,
             status=self.status,
-            messages=list(self.messages)
+            messages=list(self.messages),
+            pinned_message=self.pinned_message,
+            num_lines=self.num_lines
         )
 
 
@@ -101,10 +104,14 @@ class StateStore:
                 setattr(self._state, key, value)
         self._notify(old_state)
 
-    def add_agent(self, pane_id: str, name: str, status: str = "idle", messages: list[str] = None) -> None:
+    def add_agent(self, pane_id: str, name: str, status: str = "idle", 
+                  messages: list = None, num_lines: int = 2) -> None:
         """Add a new agent to state."""
         old_state = self._state.copy()
-        new_agent = AgentUIState(pane_id=pane_id, name=name, status=status, messages=messages or [])
+        new_agent = AgentUIState(
+            pane_id=pane_id, name=name, status=status, 
+            messages=messages or [], num_lines=num_lines
+        )
         self._state.agents.append(new_agent)
         # Set new agent as active if it's the first or we want it active
         self._state.active_index = len(self._state.agents) - 1

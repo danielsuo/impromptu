@@ -1,0 +1,98 @@
+/* Sidebar main styles using CSS variables for theming */
+
+Screen {
+    background: $background;
+}
+
+#title {
+    text-style: bold;
+    background: $primary;
+    color: $background;
+    padding: 0 1;
+    height: 1;
+}
+
+#agents-header {
+    text-style: bold;
+    padding: 1 1 0 1;
+    color: $text-muted;
+}
+
+ListView {
+    height: 1fr;
+    padding: 0 1;
+    background: $background;
+}
+
+ListItem {
+    padding: 1 1 0 1;
+    color: $text;
+    border-bottom: tall $border-light;
+}
+
+ListItem:hover {
+    background: $surface-light;
+}
+
+/* Cursor highlight when focused */
+ListItem.--highlight {
+    background: $selection-bg;
+}
+
+/* Active/visible agent pane - subtle highlight */
+ListItem.active-agent {
+    background: $agent-background;
+    color: $primary;
+    border-bottom: tall $border;
+}
+
+/* When both highlighted and active, show brighter selection */
+ListItem.active-agent.--highlight {
+    background: $selection-bg;
+}
+
+/* Agent item expanded layout */
+.agent-header {
+    color: $text;
+}
+
+.agent-message {
+    color: $text;
+    padding-left: 2;
+}
+
+ListItem.active-agent .agent-header {
+    color: $primary;
+}
+
+#current-agent {
+    padding: 0 1;
+    background: $surface;
+    color: $primary;
+    height: 1;
+    dock: bottom;
+}
+
+#shortcuts {
+    height: 1;
+    padding: 0 1;
+    background: $surface;
+    color: $text-muted;
+    dock: bottom;
+}
+
+/* Custom notification area - only visible when has content */
+#notification-area {
+    height: 0;
+    width: 100%;
+    dock: bottom;
+}
+
+#notification-area.notification {
+    height: auto;
+    max-height: 5;
+    padding: 0 1;
+    background: $surface-light;
+    color: $text;
+    border-left: wide $primary;
+}

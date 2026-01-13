@@ -11,6 +11,7 @@ from .modals import (
 )
 from .agent_list import AgentItem
 from .notification import NotificationArea
+from .sidebar import Sidebar
 
 __all__ = [
     "AgentSelectItem",
@@ -22,4 +23,6 @@ __all__ = [
     "AgentItem",
     "NotificationArea",
     "SetupCommandModal",
+    "Sidebar",
 ]
+

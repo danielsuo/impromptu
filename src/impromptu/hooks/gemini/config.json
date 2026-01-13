@@ -1,0 +1,76 @@
+{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "startup",
+      "hooks": [{
+        "name": "impromptu",
+        "type": "command",
+        "command": "$HOME/.gemini/hooks/hook.sh",
+        "timeout": 1000
+      }]
+    }],
+    "BeforeAgent": [{
+      "matcher": "",
+      "hooks": [{
+        "name": "impromptu",
+        "type": "command",
+        "command": "$HOME/.gemini/hooks/hook.sh",
+        "timeout": 1000
+      }]
+    }],
+    "AfterAgent": [{
+      "matcher": "",
+      "hooks": [{
+        "name": "impromptu",
+        "type": "command",
+        "command": "$HOME/.gemini/hooks/hook.sh",
+        "timeout": 1000
+      }]
+    }],
+    "BeforeModel": [{
+      "matcher": "",
+      "hooks": [{
+        "name": "impromptu",
+        "type": "command",
+        "command": "$HOME/.gemini/hooks/hook.sh",
+        "timeout": 1000
+      }]
+    }],
+    "AfterModel": [{
+      "matcher": "",
+      "hooks": [{
+        "name": "impromptu",
+        "type": "command",
+        "command": "$HOME/.gemini/hooks/hook.sh",
+        "timeout": 1000
+      }]
+    }],
+    "BeforeTool": [{
+      "matcher": "",
+      "hooks": [{
+        "name": "impromptu",
+        "type": "command",
+        "command": "$HOME/.gemini/hooks/hook.sh",
+        "timeout": 1000
+      }]
+    }],
+    "AfterTool": [{
+      "matcher": "",
+      "hooks": [{
+        "name": "impromptu",
+        "type": "command",
+        "command": "$HOME/.gemini/hooks/hook.sh",
+        "timeout": 1000
+      }]
+    }],
+    "Notification": [{
+      "matcher": "ToolPermission",
+      "hooks": [{
+        "name": "impromptu",
+        "type": "command",
+        "command": "$HOME/.gemini/hooks/hook.sh",
+        "timeout": 1000
+      }]
+    }]
+  }
+}

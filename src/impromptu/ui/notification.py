@@ -1,5 +1,7 @@
 """Notification area component for Impromptu UI."""
 
+import time
+
 from textual.widgets import Static
 
 
@@ -19,7 +21,6 @@ class NotificationArea(Static):
         self._check_timer = self.set_interval(self.CHECK_INTERVAL, self._check_expired)
     
     def show_message(self, message: str, duration: float = 5.0) -> None:
-        import time
         msg_id = self._next_id
         self._next_id += 1
         expire_time = time.time() + duration
@@ -32,7 +33,6 @@ class NotificationArea(Static):
         self._update_display()
     
     def _check_expired(self) -> None:
-        import time
         now = time.time()
         expired = [msg_id for msg_id, (_, expire_time) in self._messages.items() if now >= expire_time]
         if expired:

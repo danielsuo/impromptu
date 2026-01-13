@@ -23,38 +23,10 @@ def _find_config_file() -> Path:
 
     return xdg_config
 
-
-DEFAULT_CONFIG = """\
-# Impromptu Configuration
-
-[appearance]
-dark_mode = true
-
-[behavior]
-show_header = true
-show_footer = true
-
-[notifications]
-enabled = true
-sound = false
-duration_seconds = 5
-
-[layout]
-sidebar_width = 25
-
-[[agents]]
-name = "gemini"
-path = "/google/bin/releases/gemini-cli/tools/gemini"
-flags = "--yolo"
-agent_type = "gemini"
-
-[keybindings]
-switch_1 = "M-1"
-switch_2 = "M-2"
-switch_3 = "M-3"
-sidebar = "M-i"
-new_agent = "M-n"
-"""
+def _get_default_config() -> str:
+    """Load default config from configs/default.toml."""
+    default_path = Path(__file__).parent / "configs" / "default.toml"
+    return default_path.read_text()
 
 
 @dataclass
@@ -80,11 +52,24 @@ class Config:
     # Agents - list of raw TOML tables (dicts)
     agents: list[dict] = field(default_factory=list)
     
-    # Keybindings
-    keybindings: dict[str, str] = field(default_factory=dict)
+    # Unified bindings - both tmux (M-key) and sidebar bindings
+    bindings: dict | list = field(default_factory=dict)
     
     # Runtime options
     debug_mode: bool = False
+    
+    def get_tmux_bindings(self) -> dict[str, str]:
+        """Extract tmux bindings (M-key) from bindings.
+        
+        Returns dict mapping key -> action for keys starting with M-.
+        """
+        result = {}
+        if isinstance(self.bindings, dict):
+            for key, value in self.bindings.items():
+                if key.startswith("M-"):
+                    if isinstance(value, list) and len(value) >= 1:
+                        result[key] = value[0]
+        return result
     
     def get_agent_names(self) -> list[str]:
         """Get list of configured agent names."""
@@ -96,26 +81,118 @@ class Config:
             if agent.get("name") == name:
                 return agent
         return None
+    
+    def get_textual_bindings(self) -> list[tuple]:
+        """Convert bindings config to Textual BINDINGS format.
+        
+        Supports two formats:
+        - Old: list of dicts [{key, action, label}, ...]
+        - New: dict {key: [action, label], ...} or {key: [action], ...}
+        
+        Returns list of tuples: (key, action, label) or (key, action)
+        """
+        result = []
+        
+        if isinstance(self.bindings, dict):
+            # New compact format: key = [action, label] or key = [action]
+            for key, value in self.bindings.items():
+                if isinstance(value, list) and len(value) >= 1:
+                    action = value[0]
+                    label = value[1] if len(value) > 1 else None
+                    if label:
+                        result.append((key, action, label))
+                    else:
+                        result.append((key, action))
+        else:
+            # Old list format: [{key, action, label}, ...]
+            for b in self.bindings:
+                key = b.get("key", "")
+                action = b.get("action", "")
+                label = b.get("label")
+                if key and action:
+                    if label:
+                        result.append((key, action, label))
+                    else:
+                        result.append((key, action))
+        return result
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge override into base, returning a new dict.
+    
+    Lists are replaced entirely (not merged).
+    """
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _merge_agents(default_agents: list[dict], user_agents: list[dict]) -> list[dict]:
+    """Merge user agents with defaults, preserving default fields not overridden.
+    
+    For each user agent, find matching default by name and merge.
+    User values take precedence, but missing fields come from defaults.
+    """
+    if not user_agents:
+        return default_agents
+    
+    # Build lookup of default agents by name
+    defaults_by_name = {a.get("name"): a for a in default_agents}
+    
+    result = []
+    for user_agent in user_agents:
+        name = user_agent.get("name")
+        if name and name in defaults_by_name:
+            # Merge: start with defaults, override with user values
+            merged = defaults_by_name[name].copy()
+            merged.update(user_agent)
+            result.append(merged)
+        else:
+            # No matching default, use user agent as-is
+            result.append(user_agent)
+    
+    return result
 
 
 def load_config() -> Config:
-    """Load configuration from file, creating default if it doesn't exist."""
+    """Load configuration, merging user config over defaults.
+    
+    1. Load defaults from configs/default.toml
+    2. If user config exists, merge it over defaults
+    3. User config only needs to specify overrides
+    """
+    # Load defaults
+    default_path = Path(__file__).parent / "configs" / "default.toml"
+    with open(default_path, "rb") as f:
+        defaults = tomllib.load(f)
+    
+    # Find and load user config if exists
     config_file = _find_config_file()
-
-    if not config_file.exists():
+    if config_file.exists():
+        with open(config_file, "rb") as f:
+            user_config = tomllib.load(f)
+        data = _deep_merge(defaults, user_config)
+        # Special handling for agents: merge by name to preserve default fields
+        default_agents = defaults.get("agents", [])
+        user_agents = user_config.get("agents", [])
+        if user_agents:
+            data["agents"] = _merge_agents(default_agents, user_agents)
+    else:
+        # Create user config from defaults
         config_file.parent.mkdir(parents=True, exist_ok=True)
-        config_file.write_text(DEFAULT_CONFIG)
-        return Config()
-
-    with open(config_file, "rb") as f:
-        data = tomllib.load(f)
+        config_file.write_text(_get_default_config())
+        data = defaults
 
     appearance = data.get("appearance", {})
     behavior = data.get("behavior", {})
     notifications = data.get("notifications", {})
     layout = data.get("layout", {})
     agents = data.get("agents", [])
-    keybindings = data.get("keybindings", {})
+    bindings = data.get("bindings", {})
     
     # Ensure agents is a list (handles old format)
     if isinstance(agents, dict):
@@ -142,7 +219,7 @@ def load_config() -> Config:
         notifications_duration=notifications.get("duration_seconds", 5),
         sidebar_width=layout.get("sidebar_width", 25),
         agents=agents,
-        keybindings=keybindings,
+        bindings=bindings,
     )
 
 

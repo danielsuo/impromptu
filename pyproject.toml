@@ -13,3 +13,8 @@ dependencies = [
 
 [project.scripts]
 imp = "impromptu.main:main"
+
+[dependency-groups]
+dev = [
+    "pyflakes>=3.4.0",
+]

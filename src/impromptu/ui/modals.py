@@ -5,8 +5,6 @@ from textual.widgets import Static, ListView, ListItem, Label, Button, Input
 from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
 
-from ..theme import get_colors
-
 
 class AgentSelectItem(ListItem):
     """A list item for agent selection in the modal."""
@@ -22,55 +20,6 @@ class AgentSelectItem(ListItem):
 
 class AgentSelectModal(ModalScreen[tuple[str, str] | None]):
     """Modal for selecting which agent to start in a new pane."""
-    
-    @property
-    def CSS(self) -> str:
-        c = get_colors()
-        return f"""
-    AgentSelectModal {{
-        align: center middle;
-        background: rgba(0, 0, 0, 0.6);
-    }}
-    
-    #modal-container {{
-        width: 90%;
-        height: auto;
-        max-height: 20;
-        background: {c.surface};
-        border: thick {c.primary};
-        padding: 1 2;
-    }}
-    
-    #modal-title {{
-        text-style: bold;
-        text-align: center;
-        padding-bottom: 1;
-        color: {c.text};
-    }}
-    
-    #agent-select-list {{
-        height: auto;
-        max-height: 12;
-        background: {c.surface};
-    }}
-    
-    #agent-select-list > ListItem {{
-        padding: 0 1;
-        color: {c.text};
-    }}
-    
-    #agent-select-list > ListItem:hover {{
-        background: {c.primary_dim};
-    }}
-    
-    #agent-select-list > ListItem.--highlight {{
-        background: {c.selection_bg};
-    }}
-    
-    .cancel-item {{
-        color: {c.text_muted};
-    }}
-    """
     
     BINDINGS = [
         ("escape", "cancel", "Cancel"),
@@ -88,7 +37,10 @@ class AgentSelectModal(ModalScreen[tuple[str, str] | None]):
         with Vertical(id="modal-container"):
             yield Static("Select Agent", id="modal-title")
             with ListView(id="agent-select-list"):
-                for name, cmd in self.agents:
+                for agent in self.agents:
+                    # Handle both (name, cmd) and (name, cmd, num_lines) formats
+                    name = agent[0]
+                    cmd = agent[1]
                     yield AgentSelectItem(name, cmd)
                 yield AgentSelectItem("Empty Shell", "")
                 item = AgentSelectItem("[Cancel]", "__CANCEL__")
@@ -116,53 +68,6 @@ class AgentSelectModal(ModalScreen[tuple[str, str] | None]):
 
 class ShortcutsModal(ModalScreen[None]):
     """Modal showing keyboard shortcuts."""
-    
-    @property
-    def CSS(self) -> str:
-        c = get_colors()
-        return f"""
-    ShortcutsModal {{
-        align: center middle;
-        background: rgba(0, 0, 0, 0.6);
-    }}
-    
-    #shortcuts-container {{
-        width: 90%;
-        height: auto;
-        max-height: 28;
-        background: {c.surface};
-        border: thick {c.primary};
-        padding: 2 3;
-    }}
-    
-    #shortcuts-title {{
-        text-style: bold;
-        text-align: center;
-        padding-bottom: 1;
-        color: {c.primary};
-    }}
-    
-    .shortcut-section {{
-        padding-top: 1;
-        color: {c.text_muted};
-        text-style: bold;
-    }}
-    
-    .shortcut-row {{
-        color: {c.text};
-    }}
-    
-    .shortcut-key {{
-        color: {c.primary};
-        text-style: bold;
-    }}
-    
-    #close-hint {{
-        padding-top: 1;
-        text-align: center;
-        color: {c.text_dim};
-    }}
-    """
     
     BINDINGS = [
         ("escape", "close", "Close"),
@@ -225,40 +130,6 @@ class ShortcutsModal(ModalScreen[None]):
 class RenameModal(ModalScreen[str | None]):
     """Modal for renaming an agent pane."""
     
-    @property
-    def CSS(self) -> str:
-        c = get_colors()
-        return f"""
-    RenameModal {{
-        align: center middle;
-        background: rgba(0, 0, 0, 0.6);
-    }}
-    
-    #rename-container {{
-        width: 90%;
-        height: auto;
-        background: {c.surface};
-        border: thick {c.primary};
-        padding: 1 2;
-    }}
-    
-    #rename-title {{
-        text-style: bold;
-        text-align: center;
-        padding-bottom: 1;
-        color: {c.primary};
-    }}
-    
-    #rename-input {{
-        margin: 1 0;
-    }}
-    
-    #rename-hint {{
-        text-align: center;
-        color: {c.text_muted};
-    }}
-    """
-    
     BINDINGS = [
         ("escape", "cancel", "Cancel"),
     ]
@@ -287,63 +158,6 @@ class RenameModal(ModalScreen[str | None]):
 class QuitConfirmModal(ModalScreen[bool]):
     """Modal to confirm quitting impromptu."""
     
-    @property
-    def CSS(self) -> str:
-        c = get_colors()
-        return f"""
-    QuitConfirmModal {{
-        align: center middle;
-        background: rgba(0, 0, 0, 0.6);
-    }}
-    
-    #quit-container {{
-        width: 90%;
-        height: auto;
-        background: {c.surface};
-        border: thick {c.warning};
-        padding: 1 2;
-    }}
-    
-    #quit-title {{
-        text-style: bold;
-        text-align: center;
-        padding-bottom: 1;
-        color: {c.warning};
-    }}
-    
-    #quit-message {{
-        text-align: center;
-        padding: 1 0;
-        color: {c.text};
-    }}
-    
-    #button-row {{
-        height: auto;
-        width: 100%;
-        align: center middle;
-        padding-top: 1;
-    }}
-    
-    .quit-button {{
-        width: 40%;
-        min-width: 6;
-        margin: 0 1;
-    }}
-    
-    #btn-no {{
-        background: {c.primary};
-    }}
-    
-    #btn-yes {{
-        background: {c.surface};
-        border: solid {c.warning};
-    }}
-    
-    .quit-button:focus {{
-        background: {c.selection_bg};
-    }}
-    """
-    
     BINDINGS = [
         ("y", "confirm", "Yes"),
         ("n", "cancel", "No"),
@@ -366,8 +180,6 @@ class QuitConfirmModal(ModalScreen[bool]):
         self.query_one("#btn-no").focus()
     
     def on_button_pressed(self, event) -> None:
-        with open("/tmp/impromptu_error.log", "a") as f:
-            f.write(f"Button pressed: {event.button.id}\n")
         if event.button.id == "btn-yes":
             self.dismiss(True)
         else:
@@ -388,38 +200,6 @@ class QuitConfirmModal(ModalScreen[bool]):
 
 class SetupCommandModal(ModalScreen[str]):
     """Modal for entering an optional setup command before launching agent."""
-    
-    @property
-    def CSS(self) -> str:
-        c = get_colors()
-        return f"""
-    SetupCommandModal {{
-        align: center middle;
-        background: rgba(0, 0, 0, 0.6);
-    }}
-    #setup-container {{
-        width: 90%;
-        height: auto;
-        background: {c.surface};
-        border: thick {c.primary};
-        padding: 1 1;
-    }}
-    #setup-title {{
-        text-style: bold;
-        text-align: center;
-        padding-bottom: 1;
-        color: {c.text};
-    }}
-    #setup-hint {{
-        color: {c.text_muted};
-        padding-bottom: 1;
-        width: 100%;
-        overflow: hidden;
-    }}
-    #setup-input {{
-        width: 100%;
-    }}
-    """
     
     BINDINGS = [("escape", "skip", "Skip")]
     
@@ -447,63 +227,6 @@ class CloseAgentModal(ModalScreen[bool]):
         super().__init__()
         self.agent_name = agent_name
     
-    @property
-    def CSS(self) -> str:
-        c = get_colors()
-        return f"""
-    CloseAgentModal {{
-        align: center middle;
-        background: rgba(0, 0, 0, 0.6);
-    }}
-    
-    #close-container {{
-        width: 90%;
-        height: auto;
-        background: {c.surface};
-        border: thick {c.warning};
-        padding: 1 2;
-    }}
-    
-    #close-title {{
-        text-style: bold;
-        text-align: center;
-        padding-bottom: 1;
-        color: {c.warning};
-    }}
-    
-    #close-message {{
-        text-align: center;
-        padding: 1 0;
-        color: {c.text};
-    }}
-    
-    #button-row {{
-        height: auto;
-        width: 100%;
-        align: center middle;
-        padding-top: 1;
-    }}
-    
-    .close-button {{
-        width: 40%;
-        min-width: 6;
-        margin: 0 1;
-    }}
-    
-    #btn-no {{
-        background: {c.primary};
-    }}
-    
-    #btn-yes {{
-        background: {c.surface};
-        border: solid {c.warning};
-    }}
-    
-    .close-button:focus {{
-        background: {c.selection_bg};
-    }}
-    """
-    
     BINDINGS = [
         ("y", "confirm", "Yes"),
         ("n", "cancel", "No"),
@@ -526,8 +249,6 @@ class CloseAgentModal(ModalScreen[bool]):
         self.query_one("#btn-no").focus()
     
     def on_button_pressed(self, event) -> None:
-        with open("/tmp/impromptu_error.log", "a") as f:
-            f.write(f"Button pressed: {event.button.id}\n")
         if event.button.id == "btn-yes":
             self.dismiss(True)
         else:

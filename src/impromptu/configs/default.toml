@@ -1,0 +1,71 @@
+# Impromptu Configuration
+
+[appearance]
+dark_mode = true
+
+[behavior]
+show_header = true
+show_footer = true
+
+[notifications]
+enabled = true
+sound = false
+duration_seconds = 5
+
+[layout]
+sidebar_width = 25
+
+[[agents]]
+name = "gemini"
+path = "/google/bin/releases/gemini-cli/tools/gemini"
+flags = "--yolo"
+agent_type = "gemini"
+num_lines = 5  # Number of message lines to show in sidebar
+
+# Bindings: key = [action] or key = [action, label]
+# - Keys starting with "M-" are tmux global bindings (work from any pane)
+# - Other keys are sidebar bindings (work when sidebar has focus)
+# - Bindings with labels appear in the footer
+[bindings]
+# Sidebar bindings
+n = ["new_agent", "New"]
+r = ["rename_agent", "Rename"]
+i = ["import_agent", "Import"]
+"?" = ["show_shortcuts", "Help"]
+"1" = ["switch_agent(0)", "1"]
+"2" = ["switch_agent(1)", "2"]
+"3" = ["switch_agent(2)", "3"]
+"4" = ["switch_agent(3)", "4"]
+"5" = ["switch_agent(4)", "5"]
+"6" = ["switch_agent(5)", "6"]
+"7" = ["switch_agent(6)", "7"]
+"8" = ["switch_agent(7)", "8"]
+"9" = ["switch_agent(8)", "9"]
+"0" = ["switch_agent(9)", "0"]
+tab = ["focus_agent_pane", "Focus"]
+R = ["refresh", "Refresh"]
+d = ["detach", "Detach"]
+q = ["quit_app", "Quit"]
+w = ["close_agent", "Close"]
+j = ["cursor_down"]
+k = ["cursor_up"]
+"ctrl+n" = ["cursor_down"]
+"ctrl+p" = ["cursor_up"]
+
+# Tmux global bindings (Alt+key, work from any pane)
+"M-i" = ["focus_sidebar"]
+"M-n" = ["new_agent"]
+"M-r" = ["rename_agent"]
+"M-w" = ["close_agent"]
+"M-d" = ["detach"]
+"M-q" = ["quit_app"]
+"M-1" = ["switch_agent(0)"]
+"M-2" = ["switch_agent(1)"]
+"M-3" = ["switch_agent(2)"]
+"M-4" = ["switch_agent(3)"]
+"M-5" = ["switch_agent(4)"]
+"M-6" = ["switch_agent(5)"]
+"M-7" = ["switch_agent(6)"]
+"M-8" = ["switch_agent(7)"]
+"M-9" = ["switch_agent(8)"]
+"M-0" = ["switch_agent(9)"]
