@@ -7,10 +7,12 @@ from textual.widgets import ListItem, Label
 class AgentItem(ListItem):
     """A list item representing an agent with message preview."""
 
+    # Status icons using styled unicode circles (Rich markup)
     STATUS_ICONS = {
-        "idle": "🟢",
-        "busy": "🟡",
-        "blocked": "🔴",
+        "idle": "[#a6e3a1]●[/]",      # Green circle
+        "busy": "[#f9e2af]◐[/]",      # Yellow half-circle
+        "blocked": "[#f38ba8]◉[/]",   # Rose filled circle
+        "error": "[#f38ba8]✕[/]",     # Rose X
     }
 
     def __init__(self, name: str, index: int, status: str = "idle", 

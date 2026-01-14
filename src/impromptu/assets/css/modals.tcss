@@ -1,6 +1,6 @@
-/* Modal styles using CSS variables for theming */
+/* Modal styles - simple and consistent */
 
-/* Base modal overlay */
+/* All modals centered with dark overlay */
 AgentSelectModal,
 ShortcutsModal,
 RenameModal,
@@ -8,250 +8,47 @@ QuitConfirmModal,
 CloseAgentModal,
 SetupCommandModal {
     align: center middle;
-    background: rgba(0, 0, 0, 0.6);
 }
 
-/* ==================== Agent Select Modal ==================== */
-AgentSelectModal #modal-container {
-    width: 90%;
+/* Unified modal container */
+#modal-box {
+    width: auto;
+    min-width: 30;
+    max-width: 50;
     height: auto;
-    max-height: 20;
     background: $surface;
-    border: thick $primary;
+    border: round $border;
     padding: 1 2;
 }
 
-AgentSelectModal #modal-title {
+/* Title styling */
+#modal-title {
     text-style: bold;
     text-align: center;
-    padding-bottom: 1;
-    color: $text;
-}
-
-AgentSelectModal #agent-select-list {
-    height: auto;
-    max-height: 12;
-    background: $surface;
-}
-
-AgentSelectModal #agent-select-list > ListItem {
-    padding: 0 1;
-    color: $text;
-}
-
-AgentSelectModal #agent-select-list > ListItem:hover {
-    background: $primary-dim;
-}
-
-AgentSelectModal #agent-select-list > ListItem.--highlight {
-    background: $selection-bg;
-}
-
-AgentSelectModal .cancel-item {
-    color: $text-muted;
-}
-
-/* ==================== Shortcuts Modal ==================== */
-ShortcutsModal #shortcuts-container {
-    width: 90%;
-    height: auto;
-    max-height: 20;
-    background: $surface;
-    border: thick $primary;
-    padding: 1 2;
-}
-
-ShortcutsModal #shortcuts-title {
-    text-style: bold;
-    text-align: center;
-    padding-bottom: 1;
-    color: $text;
-}
-
-ShortcutsModal #shortcuts-list {
-    height: auto;
-    max-height: 15;
-    background: $surface;
-}
-
-ShortcutsModal .shortcut-row {
-    padding: 0 1;
-}
-
-ShortcutsModal .shortcut-key {
-    text-style: bold;
     color: $primary;
-    width: 8;
 }
 
-ShortcutsModal .shortcut-desc {
-    color: $text;
-}
-
-ShortcutsModal #shortcuts-hint {
+/* Hint styling */
+#modal-hint {
     text-align: center;
-    padding-top: 1;
+}
+
+/* Muted items */
+.muted {
     color: $text-muted;
 }
 
-/* ==================== Rename Modal ==================== */
-RenameModal #rename-container {
-    width: 90%;
-    height: auto;
-    background: $surface;
-    border: thick $primary;
-    padding: 1 2;
-}
-
-RenameModal #rename-title {
-    text-style: bold;
-    text-align: center;
-    padding-bottom: 1;
-    color: $text;
-}
-
-RenameModal #rename-input {
+/* Input field */
+#modal-input {
     width: 100%;
-    background: $surface-light;
-    color: $text;
-    border: solid $border;
 }
 
-RenameModal #rename-input:focus {
-    border: solid $primary;
-}
-
-RenameModal #rename-hint {
-    text-align: center;
-    padding-top: 1;
-    color: $text-muted;
-}
-
-/* ==================== Quit Confirm Modal ==================== */
-QuitConfirmModal #quit-container {
-    width: 90%;
+/* Agent selection list */
+#agent-list {
     height: auto;
-    background: $surface;
-    border: thick $warning;
-    padding: 1 2;
+    max-height: 10;
 }
 
-QuitConfirmModal #quit-title {
-    text-style: bold;
-    text-align: center;
-    padding-bottom: 1;
-    color: $warning;
-}
-
-QuitConfirmModal #quit-message {
-    text-align: center;
-    padding: 1 0;
-    color: $text;
-}
-
-QuitConfirmModal #button-row {
-    height: auto;
-    width: 100%;
-    align: center middle;
-    padding-top: 1;
-}
-
-QuitConfirmModal .quit-button {
-    width: 40%;
-    min-width: 6;
-    margin: 0 1;
-}
-
-QuitConfirmModal #btn-no {
-    background: $primary;
-}
-
-QuitConfirmModal #btn-yes {
-    background: $surface;
-    border: solid $warning;
-}
-
-QuitConfirmModal .quit-button:focus {
-    background: $selection-bg;
-}
-
-/* ==================== Setup Command Modal ==================== */
-SetupCommandModal #setup-container {
-    width: 90%;
-    height: auto;
-    background: $surface;
-    border: thick $secondary;
-    padding: 1 2;
-}
-
-SetupCommandModal #setup-title {
-    text-style: bold;
-    text-align: center;
-    padding-bottom: 1;
-    color: $secondary;
-}
-
-SetupCommandModal #setup-input {
-    width: 100%;
-    background: $surface-light;
-    color: $text;
-    border: solid $border;
-}
-
-SetupCommandModal #setup-input:focus {
-    border: solid $secondary;
-}
-
-SetupCommandModal #setup-hint {
-    text-align: center;
-    padding-top: 1;
-    color: $text-muted;
-}
-
-/* ==================== Close Agent Modal ==================== */
-CloseAgentModal #close-container {
-    width: 90%;
-    height: auto;
-    background: $surface;
-    border: thick $warning;
-    padding: 1 2;
-}
-
-CloseAgentModal #close-title {
-    text-style: bold;
-    text-align: center;
-    padding-bottom: 1;
-    color: $warning;
-}
-
-CloseAgentModal #close-message {
-    text-align: center;
-    padding: 1 0;
-    color: $text;
-}
-
-CloseAgentModal #button-row {
-    height: auto;
-    width: 100%;
-    align: center middle;
-    padding-top: 1;
-}
-
-CloseAgentModal .close-button {
-    width: 40%;
-    min-width: 6;
-    margin: 0 1;
-}
-
-CloseAgentModal #btn-no {
-    background: $primary;
-}
-
-CloseAgentModal #btn-yes {
-    background: $surface;
-    border: solid $warning;
-}
-
-CloseAgentModal .close-button:focus {
-    background: $selection-bg;
+#agent-list > ListItem {
+    padding: 0 1;
 }

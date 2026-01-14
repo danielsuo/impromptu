@@ -309,10 +309,10 @@ class Sidebar(App):
         yield Static("AGENTS", id="agents-header")
         yield ListView(id="agent-list")
         # Docked bottom elements
-        yield Static("Current: gemini", id="current-agent")
+        yield Static("▶ gemini", id="current-agent")
         yield NotificationArea()
-        # Rich markup: highlight key letters with different style
-        yield Static("[bold #7aa2f7 on #3b4261]n[/]ew  [bold #7aa2f7 on #3b4261]r[/]ename  [bold #7aa2f7 on #3b4261]i[/]mport  [bold #7aa2f7 on #3b4261]?[/]help", id="shortcuts")
+        # Shortcuts bar - subtle, muted styling
+        yield Static("[dim]n[/] new  [dim]r[/] rename  [dim]i[/] import  [dim]?[/] help", id="shortcuts")
 
     def _load_bindings(self) -> None:
         """Load keybindings from config and apply dynamically.
@@ -320,6 +320,13 @@ class Sidebar(App):
         Uses config.bindings (from TOML) and falls back to DEFAULT_BINDINGS.
         Only applies non-tmux bindings (those not starting with M-).
         """
+        # Key name translations from config format to Textual format
+        KEY_TRANSLATIONS = {
+            "?": "question_mark",
+            "/": "slash",
+            "\\": "backslash",
+        }
+        
         # Build map: action -> (key, description) from config
         config_bindings = {}
         bindings = self.config.bindings
@@ -331,7 +338,9 @@ class Sidebar(App):
                 if isinstance(value, list) and len(value) >= 1:
                     action = value[0]
                     description = value[1] if len(value) > 1 else None
-                    config_bindings[action] = (key, description)
+                    # Translate special keys
+                    translated_key = KEY_TRANSLATIONS.get(key, key)
+                    config_bindings[action] = (translated_key, description)
         
         # Merge: config takes precedence over defaults
         final_bindings = dict(self.DEFAULT_BINDINGS)
@@ -374,12 +383,6 @@ class Sidebar(App):
                 f.unlink()
         log("cleared stale mappings")
         
-        # Kill any existing pane 1 (from startup script) - we'll create our own
-        existing_pane = tmux.get_pane_id("1")
-        if existing_pane:
-            tmux.run_command(f'kill-pane -t {existing_pane}')
-        log(f"killed existing pane: {existing_pane}")
-        
         # Create initial agent
         if self._agents:
             first_name, first_cmd, first_num_lines = self._agents[0]
@@ -403,6 +406,13 @@ class Sidebar(App):
         Extracts M-key bindings and registers them with tmux.
         Maps actions to appropriate tmux commands.
         """
+        # Keys that need escaping for tmux send-keys
+        TMUX_KEY_ESCAPES = {
+            "?": "\\?",  # ? is a glob pattern in tmux
+            ";": "\\;",  # ; is command separator
+            '"': '\\"',  # quote
+        }
+        
         tmux_bindings = self.config.get_tmux_bindings()
         
         for key, action in tmux_bindings.items():
@@ -417,12 +427,20 @@ class Sidebar(App):
                 # Send the key to sidebar (0-9), then focus agent pane
                 sidebar_key = str(int(idx) + 1) if int(idx) < 9 else "0"
                 tmux.run_command(f'bind-key -n {key} "select-pane -t 0 ; send-keys {sidebar_key} ; select-pane -t 1"')
+            elif action == "show_shortcuts":
+                # Special handling - M-? needs quoting for tmux
+                if "?" in key:
+                    tmux.run_command(f'bind-key -n "{key}" "select-pane -t 0 ; send-keys ?"')
+                else:
+                    tmux.run_command(f'bind-key -n {key} "select-pane -t 0 ; send-keys ?"')
             else:
                 # For other actions, find the corresponding sidebar key and send it
                 # Look up what key triggers this action in sidebar bindings
                 sidebar_key = self._get_sidebar_key_for_action(action)
                 if sidebar_key:
-                    tmux.run_command(f'bind-key -n {key} "select-pane -t 0 ; send-keys {sidebar_key}"')
+                    # Escape special characters for tmux
+                    escaped_key = TMUX_KEY_ESCAPES.get(sidebar_key, sidebar_key)
+                    tmux.run_command(f'bind-key -n {key} "select-pane -t 0 ; send-keys {escaped_key}"')
     
     def _get_sidebar_key_for_action(self, action: str) -> str | None:
         """Find the sidebar key that triggers an action."""
@@ -622,7 +640,7 @@ class Sidebar(App):
                             # Update header label
                             labels = list(existing_item.query(Label))
                             if labels:
-                                icon = AgentItem.STATUS_ICONS.get(agent.status, "🟢")
+                                icon = AgentItem.STATUS_ICONS.get(agent.status, "[#a6e3a1]●[/]")
                                 labels[0].update(f"[{i + 1}] {icon} {agent.name}")
                             
                             # Update message labels (use agent's num_lines)
@@ -849,6 +867,8 @@ class Sidebar(App):
     
     def action_show_shortcuts(self) -> None:
         """Show the keyboard shortcuts modal."""
+        with open("/tmp/impromptu_error.log", "a") as f:
+            f.write("action_show_shortcuts called!\n")
         self.push_screen(ShortcutsModal())
     
     def action_close_agent(self) -> None:

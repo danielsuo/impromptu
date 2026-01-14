@@ -1,9 +1,10 @@
-/* Sidebar main styles using CSS variables for theming */
+/* Sidebar styles - minimal overrides, leveraging Textual defaults */
 
 Screen {
     background: $background;
 }
 
+/* Title bar */
 #title {
     text-style: bold;
     background: $primary;
@@ -18,53 +19,40 @@ Screen {
     color: $text-muted;
 }
 
+/* ListView uses Textual defaults mostly */
 ListView {
     height: 1fr;
     padding: 0 1;
     background: $background;
 }
 
+/* ListItem - subtle styling */
 ListItem {
-    padding: 1 1 0 1;
+    padding: 1 0;
     color: $text;
-    border-bottom: tall $border-light;
 }
 
-ListItem:hover {
-    background: $surface-light;
-}
-
-/* Cursor highlight when focused */
-ListItem.--highlight {
-    background: $selection-bg;
-}
-
-/* Active/visible agent pane - subtle highlight */
+/* Active agent - right accent instead of left to avoid text shift */
 ListItem.active-agent {
-    background: $agent-background;
-    color: $primary;
-    border-bottom: tall $border;
-}
-
-/* When both highlighted and active, show brighter selection */
-ListItem.active-agent.--highlight {
-    background: $selection-bg;
-}
-
-/* Agent item expanded layout */
-.agent-header {
-    color: $text;
-}
-
-.agent-message {
-    color: $text;
-    padding-left: 2;
+    background: $surface;
+    border-right: wide $primary;
 }
 
 ListItem.active-agent .agent-header {
     color: $primary;
 }
 
+/* Agent layout */
+.agent-header {
+    color: $text;
+}
+
+.agent-message {
+    color: $text-muted;
+    padding-left: 2;
+}
+
+/* Bottom bars */
 #current-agent {
     padding: 0 1;
     background: $surface;
@@ -81,7 +69,7 @@ ListItem.active-agent .agent-header {
     dock: bottom;
 }
 
-/* Custom notification area - only visible when has content */
+/* Notification area */
 #notification-area {
     height: 0;
     width: 100%;

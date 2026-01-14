@@ -12,44 +12,45 @@ from typing import Optional
 class ColorPalette:
     """Color palette for the UI theme.
     
-    Based on a gentle dark dashboard aesthetic with muted pastel accents.
+    Catppuccin Mocha-inspired palette with warm, muted tones.
     """
-    # Background colors (dark navy)
-    background: str = "#1a1b26"     # Darkest background
-    surface: str = "#1f2335"        # Cards/panels
-    surface_light: str = "#292e42" # Slightly lighter surface
+    # Background colors (warm dark)
+    background: str = "#1e1e2e"     # Base background
+    surface: str = "#313244"        # Cards/panels (surface0)
+    surface_light: str = "#45475a"  # Elevated surfaces (surface1)
     
-    # Border colors
-    border: str = "#3b4261"
-    border_light: str = "#545c7e"
+    # Border colors (subtle)
+    border: str = "#45475a"         # surface1
+    border_light: str = "#585b70"   # surface2
     
     # Text colors
-    text: str = "#c0caf5"          # Primary text (soft blue-white)
-    text_muted: str = "#565f89"    # Secondary/muted text
-    text_dim: str = "#3b4261"      # Very dim text
+    text: str = "#cdd6f4"           # Primary text (soft lavender-white)
+    text_muted: str = "#6c7086"     # Secondary/muted (overlay1)
+    text_dim: str = "#45475a"       # Very dim (surface1)
     
     # Accent colors (muted pastels)
-    primary: str = "#7aa2f7"       # Soft blue
-    primary_dim: str = "#3d59a1"   # Dimmed primary
-    secondary: str = "#bb9af7"     # Soft purple
+    primary: str = "#b4befe"        # Lavender - main accent
+    primary_dim: str = "#585b70"    # Dimmed primary
+    secondary: str = "#cba6f7"      # Mauve - secondary accent
     
     # Status colors (gentle pastels)
-    success: str = "#9ece6a"       # Soft green
-    success_dim: str = "#4d6c36"
-    warning: str = "#e0af68"       # Soft amber/gold
-    warning_dim: str = "#8a6622"
-    error: str = "#f7768e"         # Soft pink/coral
-    error_dim: str = "#914c5b"
+    success: str = "#a6e3a1"        # Green
+    success_dim: str = "#4a6a47"
+    warning: str = "#f9e2af"        # Yellow
+    warning_dim: str = "#7a7048"
+    error: str = "#f38ba8"          # Red/rose
+    error_dim: str = "#764354"
     
     # Agent status indicators
-    agent_active: str = "#9ece6a"    # Soft green - visible/ready
-    agent_background: str = "#565f89" # Muted gray - in background
-    agent_busy: str = "#e0af68"       # Soft amber - processing
+    agent_active: str = "#a6e3a1"    # Green - visible/ready
+    agent_background: str = "#45475a" # Surface - in background
+    agent_busy: str = "#f9e2af"       # Yellow - processing
+    agent_blocked: str = "#f38ba8"    # Rose - needs attention
     
     # Selection/highlight colors
-    selection: str = "#7aa2f7"
-    selection_bg: str = "#283457"   # Selection background
-    highlight: str = "#7dcfff"      # Soft cyan highlight
+    selection: str = "#b4befe"        # Lavender
+    selection_bg: str = "#313244"     # Surface0 for selection bg
+    highlight: str = "#89dceb"        # Sky - accent highlight
 
 
 @dataclass

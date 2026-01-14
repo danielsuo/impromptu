@@ -64,32 +64,10 @@ def main():
         subprocess.run(["tmux", "attach-session", "-t", session_name])
         return
 
-    # We're inside tmux - set up layout and run sidebar
+    # We're inside tmux - sidebar handles layout and agent creation in on_mount()
     if "--inside-tmux" in sys.argv:
-        try:
-            # Get first agent command (unused currently, but kept for future use)
-            agents = config.agents  # config.agents is already a list
-            first_agent_cmd = "bash"
-
-            # Small delay to let window settle at full size
-            time.sleep(0.2)
-            
-            # Create agent pane on the right (85% of full window)
-            # Use send-keys to run command in new pane, inheriting shell environment
-            tmux.run_command('split-window -h -f -l 85%')
-            if first_agent_cmd and first_agent_cmd != "bash":
-                tmux.run_command(f'send-keys "{first_agent_cmd}; exit" Enter')
-            
-            # Resize sidebar to 20% of current window
-            tmux.resize_pane("0", width="20%")
-
-            # Keybindings are registered in Sidebar.on_mount() -> _register_keybindings()
-
-            # Focus agent pane (pane 1) to start in agent view
-            tmux.select_pane("1")
-        except Exception as e:
-            # Layout setup failed, continue with just sidebar
-            print(f"Layout setup warning: {e}", file=sys.stderr)
+        # Small delay to let window settle at full size before sidebar starts
+        time.sleep(0.1)
 
     # Run the sidebar app - bindings are loaded dynamically in on_mount
     try:
